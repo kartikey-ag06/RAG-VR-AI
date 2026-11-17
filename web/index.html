@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VR_RAG - SEBI x Reliance Industries</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0d14; color: #e8e8e8; font-family: Segoe UI, Arial, sans-serif; overflow: hidden; }
+  #ui { position: absolute; top: 12px; left: 12px; width: 420px; max-height: calc(100% - 24px); overflow: auto;
+        background: rgba(15, 20, 32, .92); border: 1px solid #2a3550; border-radius: 10px; padding: 14px; z-index: 10; }
+  h1 { font-size: 17px; margin: 0 0 4px; color: #8cc8ff; }
+  #status { font-size: 12px; color: #8a93a6; margin-bottom: 10px; }
+  #q { width: 100%; box-sizing: border-box; padding: 9px; border-radius: 6px; border: 1px solid #3a4766; background: #0d1220; color: #fff; font-size: 14px; }
+  button { margin: 6px 6px 0 0; padding: 6px 10px; border-radius: 6px; border: 1px solid #3a4766; background: #1b2540; color: #dfe8ff; cursor: pointer; font-size: 12px; }
+  button:hover { background: #26345a; }
+  #answer { white-space: pre-wrap; font-size: 13px; line-height: 1.45; margin-top: 12px; }
+  #sources { font-size: 12px; color: #ffd98a; margin-top: 10px; white-space: pre-wrap; }
+  .keys { font-size: 11px; color: #7d879c; margin-top: 10px; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <h1>VR_RAG &mdash; SEBI x Reliance Industries</h1>
+  <div id="status">Loading index...</div>
+  <input id="q" placeholder="Ask about the 10 SEBI orders... (Enter)" autocomplete="off">
+  <div id="samples"></div>
+  <div id="answer"></div>
+  <div id="sources"></div>
+  <div class="keys">Enter = ask &middot; Tab = next source &middot; &larr;/&rarr; = PDF page &middot; In VR: trigger = next page, grip = next source.
+    Typing works inside VR too.</div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# secrets - never commit
+grok_api_key.txt
+.env
+
+# backups and build leftovers
+_*.zip
+glasses_app/node_modules/
+glasses_app/dist/_test/
+__pycache__/
+*.pyc
