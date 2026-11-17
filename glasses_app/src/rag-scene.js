@@ -6,7 +6,7 @@
 //   squeeze / grip   = next source
 // Keyboard: type in the box (top-left) + Enter. Tab = next source, [ / ] = prev / next page.
 import { Mesh, PlaneGeometry, MeshBasicMaterial, CanvasTexture, SRGBColorSpace, DoubleSide } from '@iwsdk/core';
-import { RagIndex, pageImageUrl, loadLlmConfig, answerSmart } from './rag.js';
+import { RagIndex, pageImageUrl, loadLlmConfig, answerSmart, serverSearch } from './rag.js';
 import { setupVoice } from './voice.js';
 
 const SAMPLES = [
@@ -155,7 +155,11 @@ export function setupRag(world) {
     if (!q || state.busy || !state.index) return;
     state.busy = true; state.query = q; $('rag-q').value = q;
     state.mode = ''; state.hits = []; state.hitIdx = 0;
-    const found = state.index.search(q, 8);           // R: retrieve up to 8 matching PDF chunks
+    // R: retrieve up to 8 matching PDF chunks - hybrid (embeddings + TF-IDF) on the Python backend,
+    //    or plain TF-IDF in the browser when the backend is not running
+    const srv = await serverSearch(state.index, q, 8);
+    const found = srv ? srv.hits : state.index.search(q, 8);
+    state.searchMode = srv ? srv.mode : 'keyword (browser)';
     state.answer = state.llm.provider === 'none' ? 'Searching the PDFs...' : `Asking ${state.llm.provider}...`;
     syncDom();
     const res = await answerSmart(q, found, state.llm); // G: AI answers from PDFs or general knowledge
@@ -164,6 +168,7 @@ export function setupRag(world) {
     if (state.hits.length) showPage(state.hits[0].doc.id, state.hits[0].chunk.page);
     else { state.doc = -1; drawPdf(null, res.mode === 'general' ? 'No PDF page - this answer is general knowledge' : 'No matching PDF page'); }
     state.busy = false; syncDom();
+    $('rag-status').textContent = state.status + ` · last search: ${state.searchMode}`;
   }
 
   function nextHit() {
@@ -200,7 +205,7 @@ export function setupRag(world) {
       state.index = await RagIndex.load();
       state.llm = await loadLlmConfig();
       const d = state.index.data;
-      state.status = `${d.docs.length} SEBI orders · ${d.chunks.length} chunks · LLM: ${state.llm.provider}${state.llm.model ? ' (' + state.llm.model + ')' : ''}`;
+      state.status = `${d.docs.length} SEBI orders · ${d.chunks.length} chunks · LLM: ${state.llm.provider}${state.llm.model ? ' (' + state.llm.model + ')' : ''} · search: ${state.llm.search || 'keyword (browser)'}`;
       state.answer = 'Ask ANY question in the box (top-left) and press Enter.\nIf the answer is in the SEBI PDFs you will see the PDF page; otherwise you get a general AI answer.\n\nExamples:\n' + SAMPLES.map((s, i) => `${i + 1}. ${s}`).join('\n');
     } catch (e) {
       state.status = 'ERROR: ' + e.message; state.answer = state.status;

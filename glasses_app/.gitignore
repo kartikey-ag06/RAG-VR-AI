@@ -3,7 +3,7 @@ node_modules/
 .pnpm-debug.log*
 
 # Build outputs
-dist/
+# dist/ is committed on purpose: teammates run the pre-built app without Node.js
 *.tsbuildinfo
 
 # Environment files

@@ -30,6 +30,16 @@
 - With no Groq key, the app falls back to Chrome's built-in speech recognition (`en-IN`).
 - The first time, Chrome asks for microphone permission for localhost. Click **Allow**.
 
+## Embeddings + hybrid search (Python backend)
+- `START_VR_RAG.bat` now starts **`backend/app.py`** (FastAPI). The first run creates `backend/.venv` and installs `backend/requirements.txt` once. That takes 2-5 minutes and about 250 MB.
+- Search is **hybrid**:
+  - **Embeddings** (`BAAI/bge-small-en-v1.5` via fastembed, ONNX on the CPU, no PyTorch) find text with the same **meaning**. "fine" matches "penalty".
+  - **TF-IDF** finds **exact terms** such as "15HB" and "13,00,00,000".
+  - The two rankings are merged with **Reciprocal Rank Fusion** (RRF): score = 1/(60 + rank_semantic) + 0.8/(60 + rank_keyword).
+- Chunk embeddings are computed once and cached in `backend/cache/`. The cache is rebuilt automatically when `index.json` changes.
+- The API stays the same (`/api/grok`, `/api/stt`, `/api/grok/status`) plus a new **`/api/search`**. If the Python backend is not running, the app falls back to TF-IDF in the browser.
+- No Python? Use `START_VR_RAG_POWERSHELL.bat`, the old server with keyword search only.
+
 ---
 
 Ask a question, and the app finds the matching text in 10 SEBI enforcement orders.

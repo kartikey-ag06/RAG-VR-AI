@@ -67,6 +67,7 @@ export async function loadLlmConfig() {
     try {
       const r = await fetch("/api/grok/status", { signal: AbortSignal.timeout(1500) });
       const st = await r.json();
+      cfg.search = st.search || ""; cfg.backend = st.backend || "powershell";
       if (st.configured) { cfg.provider = st.provider || "grok"; cfg.model = st.model; cfg.stt = !!st.stt; return cfg; }
     } catch { /* server without Grok support */ }
     if (cfg.provider === "grok") { cfg.provider = "none"; cfg.note = "Grok key not found (grok_api_key.txt)"; return cfg; }
@@ -228,4 +229,21 @@ export async function transcribe(blob) {
   const j = await r.json();
   if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
   return (j.text || "").trim();
+}
+
+// ---------------- Hybrid search on the Python backend ----------------
+/** Asks the Python backend (embeddings + TF-IDF). Returns hits in the same shape as RagIndex.search,
+ *  or null when the backend is not there (PowerShell server / offline) so the caller can fall back. */
+export async function serverSearch(index, query, k = 8) {
+  try {
+    const r = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, k }), signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const hits = (j.hits || []).map((h) => {
+      const chunk = index.data.chunks[h.i];
+      return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw };
+    });
+    return { mode: j.mode, hits };
+  } catch { return null; }
 }

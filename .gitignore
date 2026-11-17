@@ -8,3 +8,7 @@ glasses_app/node_modules/
 glasses_app/dist/_test/
 __pycache__/
 *.pyc
+
+# python backend
+backend/.venv/
+backend/cache/
