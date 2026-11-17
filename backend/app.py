@@ -8,6 +8,9 @@ What it does
   3. /api/grok    : AI answers via Groq (gsk_...) or Grok/xAI (xai-...); the key never reaches the browser
   4. /api/stt     : voice -> text via Groq Whisper
   5. /api/server/stop : stop the server (localhost only)
+  6. /upload      : web page to upload PDF / DOCX / TXT; files are stored + indexed in backend/data/
+     /api/files   : list (GET), upload (POST), delete (DELETE /api/files/<uid>)
+     /rag/index.json, /rag/pages/... : served from the document store, so the VR app always sees the uploads
 
 Embeddings
   Model: BAAI/bge-small-en-v1.5 via fastembed (ONNX, CPU, no PyTorch). Downloaded once (~70 MB).
@@ -15,7 +18,6 @@ Embeddings
 
 Run:  START_VR_RAG.bat   (or: python backend/app.py)
 """
-import hashlib
 import json
 import math
 import os
@@ -31,14 +33,14 @@ from pathlib import Path
 import numpy as np
 import requests
 import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from indexer import Store, tokenize
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT / ("web" if "--app=web" in sys.argv else "glasses_app/dist")
-INDEX_FILE = APP_DIR / "rag" / "index.json"
-CACHE_DIR = ROOT / "backend" / "cache"
 EMBED_MODEL = os.environ.get("VR_RAG_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 RRF_K = 60            # standard RRF constant
 W_SEMANTIC = 1.0      # weight of the embedding ranking
@@ -46,30 +48,20 @@ W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "
 
 app = FastAPI(title="VR_RAG backend")
 
-# ---------------------------------------------------------------- index + TF-IDF
-INDEX = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-CHUNKS = INDEX["chunks"]
-VOCAB = {t: i for i, t in enumerate(INDEX["vocab"])}
-IDF = INDEX["idf"]
-STOP = set("""a an the and or of to in on for by with at from as is are was were be been being this that these those it its
-which who whom whose what when where why how not no nor but if then than so such into upon under over above below
-shall will would should may might can could must do does did done have has had having he she they them his her their
-i we you me us our your said also any all each other same per vide hereinafter thereof therein herein whereas
-page sebi noticee noticees order""".split())  # must match rag_pipeline/build_index.py
+# ---------------------------------------------------------------- document store (uploads) + TF-IDF
+DATA_DIR = ROOT / "backend" / "data"
+STORE = Store(DATA_DIR, seed_dir=ROOT / "docs")   # first run imports the 10 original PDFs from docs/
 
 
-def tokenize(text):
-    return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) > 1 and t not in STOP]
-
-
-def tfidf_scores(query):
-    counts = Counter(t for t in tokenize(query) if t in VOCAB)
+def tfidf_scores(snap, query):
+    vocab, idf, chunks = snap["vocab"], snap["index"]["idf"], snap["index"]["chunks"]
+    counts = Counter(t for t in tokenize(query) if t in vocab)
+    out = np.zeros(len(chunks), dtype=np.float32)
     if not counts:
-        return np.zeros(len(CHUNKS), dtype=np.float32)
-    q = {VOCAB[t]: (1 + math.log(c)) * IDF[VOCAB[t]] for t, c in counts.items()}
+        return out
+    q = {vocab[t]: (1 + math.log(c)) * idf[vocab[t]] for t, c in counts.items()}
     norm = math.sqrt(sum(v * v for v in q.values()))
-    out = np.zeros(len(CHUNKS), dtype=np.float32)
-    for i, ch in enumerate(CHUNKS):
+    for i, ch in enumerate(chunks):
         s = 0.0
         for t, w in zip(ch["terms"], ch["weights"]):
             qw = q.get(t)
@@ -79,8 +71,8 @@ def tfidf_scores(query):
     return out
 
 
-# ---------------------------------------------------------------- embeddings (loaded in background)
-EMB = {"state": "warming", "model": None, "matrix": None, "error": None, "secs": None}
+# ---------------------------------------------------------------- embeddings (model loaded in background)
+EMB = {"state": "warming", "model": None, "error": None}
 
 
 def load_embeddings():
@@ -88,27 +80,13 @@ def load_embeddings():
     try:
         from fastembed import TextEmbedding
         model = TextEmbedding(EMBED_MODEL)
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha1(INDEX_FILE.read_bytes()).hexdigest()[:12]
-        cache = CACHE_DIR / f"emb_{EMBED_MODEL.replace('/', '_')}_{digest}.npy"
-        if cache.exists():
-            matrix = np.load(cache)
-        else:
-            print(f"[embeddings] embedding {len(CHUNKS)} chunks with {EMBED_MODEL} (one time)...", flush=True)
-            matrix = np.array(list(model.passage_embed([c["text"] for c in CHUNKS], batch_size=32)), dtype=np.float32)
-            matrix /= np.linalg.norm(matrix, axis=1, keepdims=True)
-            np.save(cache, matrix)
-        EMB.update(state="ready", model=model, matrix=matrix, secs=round(time.time() - t0, 1))
-        print(f"[embeddings] ready: {matrix.shape[0]} x {matrix.shape[1]} in {EMB['secs']}s", flush=True)
+        EMB.update(state="ready", model=model)
+        STORE.model_name, STORE.embedder = EMBED_MODEL, model
+        STORE.request_rebuild()                      # embeds any document not cached yet
+        print(f"[embeddings] model ready in {time.time() - t0:.1f}s", flush=True)
     except Exception as e:  # keep serving with TF-IDF only
         EMB.update(state="failed", error=str(e))
         print(f"[embeddings] FAILED, using keyword search only: {e}", flush=True)
-
-
-def semantic_scores(query):
-    q = np.array(list(EMB["model"].query_embed([query]))[0], dtype=np.float32)
-    q /= np.linalg.norm(q)
-    return EMB["matrix"] @ q
 
 
 def ranks(scores):
@@ -122,18 +100,78 @@ def ranks(scores):
 async def search(req: Request):
     body = await req.json()
     query, k = str(body.get("query", "")).strip(), int(body.get("k", 8))
-    if not query:
-        return {"mode": "none", "hits": []}
-    kw = tfidf_scores(query)
-    if EMB["state"] != "ready":
+    snap = STORE.snapshot                                  # one consistent version of the index
+    n = len(snap["index"]["chunks"])
+    if not query or not n:
+        return {"mode": "none", "version": snap["version"], "hits": []}
+    kw = tfidf_scores(snap, query)
+    matrix = snap["matrix"]
+    if EMB["state"] != "ready" or matrix is None or matrix.shape[0] != n:
         order = [int(i) for i in np.argsort(-kw)[:k] if kw[i] > 0]
-        return {"mode": "keyword", "embeddings": EMB["state"],
+        return {"mode": "keyword", "version": snap["version"], "embeddings": EMB["state"],
                 "hits": [{"i": i, "score": float(kw[i]), "kw": float(kw[i]), "sem": None} for i in order]}
-    sem = semantic_scores(query)
+    q = np.array(list(EMB["model"].query_embed([query]))[0], dtype=np.float32)
+    sem = matrix @ (q / np.linalg.norm(q))
     rrf = W_SEMANTIC / (RRF_K + ranks(sem)) + W_KEYWORD * (kw > 0) / (RRF_K + ranks(kw))
     order = [int(i) for i in np.argsort(-rrf)[:k]]
-    return {"mode": "hybrid", "model": EMBED_MODEL,
+    return {"mode": "hybrid", "model": EMBED_MODEL, "version": snap["version"],
             "hits": [{"i": i, "score": float(rrf[i]), "sem": float(sem[i]), "kw": float(kw[i])} for i in order]}
+
+
+# ---------------------------------------------------------------- uploads + dynamic index for the VR app
+NO_CACHE = {"Cache-Control": "no-store"}
+
+
+@app.get("/upload")
+def upload_page():
+    return FileResponse(ROOT / "backend" / "static" / "upload.html", headers=NO_CACHE)
+
+
+@app.get("/api/files")
+def files_list():
+    snap = STORE.snapshot
+    return {"files": STORE.list(), "version": snap["version"], "state": STORE.state,
+            "chunks": len(snap["index"]["chunks"]), "embeddings": EMB["state"]}
+
+
+@app.post("/api/files")
+async def files_upload(files: list[UploadFile] = File(...)):
+    added, errors = [], []
+    for f in files:
+        try:
+            added.append(STORE.add(f.filename or "file", await f.read()))
+        except ValueError as e:
+            errors.append(str(e))
+    return JSONResponse({"added": added, "errors": errors}, status_code=200 if added or not errors else 400)
+
+
+@app.delete("/api/files/{uid}")
+def files_delete(uid: str):
+    if not re.fullmatch(r"[0-9a-f]{12}", uid) or not STORE.delete(uid):
+        return JSONResponse({"error": "not found"}, 404)
+    return {"deleted": uid}
+
+
+@app.get("/api/index/version")
+def index_version():
+    snap = STORE.snapshot
+    return {"version": snap["version"], "docs": len(snap["index"]["docs"]),
+            "chunks": len(snap["index"]["chunks"]), "state": STORE.state}
+
+
+@app.get("/rag/index.json")
+def rag_index():
+    return Response(json.dumps(STORE.snapshot["index"], ensure_ascii=False), media_type="application/json",
+                    headers=NO_CACHE)
+
+
+@app.get("/rag/pages/{name}")
+def rag_page(name: str):
+    m = re.fullmatch(r"d(\d+)_p(\d+)\.jpg", name)
+    p = STORE.page_image(int(m.group(1)), int(m.group(2))) if m else None
+    if not p:
+        return JSONResponse({"error": "page not found"}, 404)
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
 
 # ---------------------------------------------------------------- LLM provider (Groq / Grok)
@@ -205,6 +243,7 @@ def status():
     return {"configured": bool(p), "provider": p["name"] if p else "", "model": chat_model() if p else "",
             "stt": bool(p and p["name"] == "groq"),
             "search": "hybrid" if EMB["state"] == "ready" else ("keyword (embeddings " + EMB["state"] + ")"),
+            "docs": len(STORE.snapshot["index"]["docs"]), "indexVersion": STORE.snapshot["version"],
             "embedModel": EMBED_MODEL, "backend": "python"}
 
 
@@ -278,6 +317,7 @@ if __name__ == "__main__":
     print(f"VR_RAG (python backend) running at http://localhost:{port}/  (close this window to stop)")
     print(f"AI: {'ON - ' + p['name'] if p else 'OFF - put a Groq key in grok_api_key.txt'}")
     print(f"Search: hybrid (TF-IDF + {EMBED_MODEL}) - embeddings load in the background")
+    print(f"Upload documents at http://localhost:{port}/upload  (stored in {DATA_DIR})")
     threading.Thread(target=load_embeddings, daemon=True).start()
     if "--no-browser" not in sys.argv:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}/")).start()

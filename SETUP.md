@@ -15,7 +15,7 @@
   `cd glasses_app`, `npm install`, `npm run build`
   The build goes to `glasses_app/dist/`, which the server serves. Use `npm run dev` for live editing.
 - Backend: `backend/app.py` (FastAPI: hybrid search, Groq proxy, voice). Old fallback server: `server.ps1`.
-- Add or replace PDFs: put them in `docs/`, then run `pip install pymupdf` and `python rag_pipeline/build_index.py`.
-  Copy the new `web/rag/` contents into `glasses_app/public/rag/` and rebuild.
+- Add documents: use the upload page at http://localhost:8765/upload (PDF, DOCX, TXT). Files are stored in `backend/data/`, which is not in git.
+  The old way (`docs/` + `rag_pipeline/build_index.py`) only feeds the PowerShell fallback server.
 
 See README.md for how the project works.

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VR_RAG - Upload documents</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --warn:#e0a63a; --bad:#e5596b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 20px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  h1 { font-size: 22px; margin: 0; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin: 4px 0 24px; }
+  a.btn, button { display:inline-block; border:1px solid var(--line); background:#1a2540; color:var(--text);
+    padding:8px 14px; border-radius:8px; text-decoration:none; cursor:pointer; font:inherit; }
+  a.btn.primary { background: var(--accent); border-color: var(--accent); color:#06101f; font-weight:600; }
+  #drop { border:2px dashed var(--line); border-radius:12px; background:var(--card); padding:36px 20px; text-align:center;
+    transition: border-color .15s, background .15s; cursor:pointer; }
+  #drop.over { border-color: var(--accent); background:#15223d; }
+  #drop strong { font-size: 17px; }
+  #drop .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  #queue { margin-top: 14px; }
+  .up { display:flex; align-items:center; gap:10px; font-size:13px; margin:6px 0; }
+  .up .name { flex: 0 0 38%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar { flex:1; height:8px; background:#1d2740; border-radius:4px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); transition: width .1s; }
+  .up .msg { flex: 0 0 25%; color: var(--muted); text-align:right; }
+  h2 { font-size:16px; margin:32px 0 10px; display:flex; justify-content:space-between; align-items:baseline; }
+  h2 small { color: var(--muted); font-weight:400; font-size:13px; }
+  table { width:100%; border-collapse: collapse; background: var(--card); border-radius: 10px; overflow:hidden; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); font-size:14px; }
+  th { color: var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align:right; color: var(--muted); white-space:nowrap; }
+  .badge { font-size:11px; padding:2px 8px; border-radius:10px; font-weight:600; white-space:nowrap; }
+  .ready { background:#14351f; color: var(--ok); } .processing { background:#3a2d10; color: var(--warn); } .error { background:#3b1219; color: var(--bad); }
+  .type { color: var(--muted); font-size:12px; }
+  td button { padding:4px 10px; font-size:12px; }
+  td button:hover { border-color: var(--bad); color: var(--bad); }
+  .err { color: var(--bad); font-size:12px; }
+  #empty { color: var(--muted); padding: 18px; text-align:center; }
+  footer { margin-top: 24px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>VR_RAG <span>· Upload documents</span></h1>
+      <div class="sub">Files you upload here are stored on the VR_RAG server, indexed automatically, and searchable from the Meta VR Glasses app.</div>
+    </div>
+    <a class="btn primary" href="/" target="_blank">Open VR app ↗</a>
+  </header>
+
+  <div id="drop" tabindex="0">
+    <strong>Drag &amp; drop files here</strong> or click to choose
+    <div class="hint">PDF, Word (.docx) or text (.txt) · up to 50 MB each · several at once</div>
+    <input id="picker" type="file" accept=".pdf,.docx,.txt" multiple hidden>
+  </div>
+  <div id="queue"></div>
+
+  <h2>Documents <small id="summary">loading…</small></h2>
+  <table>
+    <thead><tr><th>Name</th><th>Type</th><th style="text-align:right">Pages</th><th style="text-align:right">Size</th><th>Status</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" hidden>No documents yet. Upload one above.</div>
+  <footer>Tip: after uploading, ask a question in the VR app; it reloads the documents automatically.</footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtSize = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ALLOWED = ['pdf', 'docx', 'txt'];
+let pollTimer = null;
+
+// ---------- upload (one request per file so each gets its own progress bar)
+function uploadFile(file) {
+  const row = document.createElement('div');
+  row.className = 'up';
+  row.innerHTML = `<span class="name" title="${esc(file.name)}">${esc(file.name)}</span><span class="bar"><i></i></span><span class="msg">waiting…</span>`;
+  $('queue').prepend(row);
+  const bar = row.querySelector('i'), msg = row.querySelector('.msg');
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!ALLOWED.includes(ext)) { msg.textContent = 'only PDF, DOCX, TXT'; msg.className = 'msg err'; return; }
+  if (file.size > 50 * 1048576) { msg.textContent = 'over 50 MB'; msg.className = 'msg err'; return; }
+  const form = new FormData();
+  form.append('files', file);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/files');
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { bar.style.width = (100 * e.loaded / e.total) + '%'; msg.textContent = Math.round(100 * e.loaded / e.total) + '%'; } };
+  xhr.onload = () => {
+    let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status === 200 && j.added && j.added.length) { bar.style.width = '100%'; msg.textContent = 'uploaded - indexing…'; refresh(); }
+    else { msg.textContent = (j.errors && j.errors[0]) || ('failed (' + xhr.status + ')'); msg.className = 'msg err'; }
+  };
+  xhr.onerror = () => { msg.textContent = 'server not reachable'; msg.className = 'msg err'; };
+  xhr.send(form);
+}
+const handle = (list) => [...list].forEach(uploadFile);
+
+const drop = $('drop');
+drop.onclick = () => $('picker').click();
+drop.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') $('picker').click(); };
+$('picker').onchange = (e) => { handle(e.target.files); e.target.value = ''; };
+['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', (e) => handle(e.dataTransfer.files));
+
+// ---------- list + delete
+async function refresh() {
+  let j;
+  try { j = await (await fetch('/api/files', { cache: 'no-store' })).json(); }
+  catch { $('summary').textContent = 'server not reachable - is START_VR_RAG.bat running?'; return; }
+  const files = j.files.slice().reverse();          // newest first
+  const ready = files.filter((f) => f.status === 'ready');
+  const busy = files.some((f) => f.status === 'processing') || j.state === 'indexing';
+  $('summary').textContent = `${ready.length} searchable · ${j.chunks} chunks · search: ${j.embeddings === 'ready' ? 'hybrid (embeddings + keywords)' : 'keywords (embeddings ' + j.embeddings + ')'}${busy ? ' · indexing…' : ''}`;
+  $('empty').hidden = files.length > 0;
+  $('rows').innerHTML = files.map((f) => `
+    <tr>
+      <td>${esc(f.title)}<div class="type">${esc(f.name)}</div>${f.error ? `<div class="err">${esc(f.error)}</div>` : ''}</td>
+      <td class="type">${esc(f.type)}</td>
+      <td class="num">${f.pages || '–'}</td>
+      <td class="num">${fmtSize(f.size)}</td>
+      <td><span class="badge ${f.status}">${f.status === 'processing' ? 'indexing…' : f.status}</span></td>
+      <td><button data-uid="${f.uid}" data-name="${esc(f.name)}">Delete</button></td>
+    </tr>`).join('');
+  clearTimeout(pollTimer);
+  if (busy) pollTimer = setTimeout(refresh, 1500);
+  else document.querySelectorAll('#queue .msg').forEach((m) => { if (m.textContent.includes('indexing')) { m.textContent = 'ready ✓'; m.style.color = 'var(--ok)'; } });
+}
+$('rows').onclick = async (e) => {
+  const b = e.target.closest('button[data-uid]');
+  if (!b || !confirm(`Delete "${b.dataset.name}"? It will no longer be searchable in the VR app.`)) return;
+  b.disabled = true;
+  await fetch('/api/files/' + b.dataset.uid, { method: 'DELETE' });
+  refresh();
+};
+refresh();
+</script>
+</body>
+</html>

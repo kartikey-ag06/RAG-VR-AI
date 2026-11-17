@@ -13,7 +13,8 @@ export function tokenize(text) {
 
 export class RagIndex {
   static async load(url = import.meta.env.BASE_URL + "rag/index.json") {
-    const data = await (await fetch(url)).json();
+    const data = await (await fetch(url, { cache: "no-store" })).json();
+    indexVersion = data.version || 0;
     const ix = new RagIndex();
     ix.data = data;
     ix.vocab = new Map(data.vocab.map((t, i) => [t, i]));
@@ -49,8 +50,19 @@ export class RagIndex {
   }
 }
 
+// The index version changes whenever documents are uploaded or deleted; adding it to page URLs
+// stops the browser from showing a cached image of a page that now belongs to another document.
+let indexVersion = 0;
 export function pageImageUrl(docId, page) {
-  return import.meta.env.BASE_URL + `rag/pages/d${String(docId).padStart(2, "0")}_p${String(page).padStart(3, "0")}.jpg`;
+  return import.meta.env.BASE_URL + `rag/pages/d${String(docId).padStart(2, "0")}_p${String(page).padStart(3, "0")}.jpg?v=${indexVersion}`;
+}
+
+/** Current index version on the server (null when the server has no upload support). */
+export async function serverIndexVersion() {
+  try {
+    const r = await fetch("/api/index/version", { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    return r.ok ? (await r.json()).version : null;
+  } catch { return null; }
 }
 
 // ---------------- Generation ----------------
@@ -116,8 +128,8 @@ export function extractive(question, hits) {
 // Groq decides: if the PDF excerpts answer it -> cite them (and the app shows that PDF page);
 // otherwise -> a general-knowledge answer, clearly labelled, with no PDF page.
 const SMART_SYSTEM =
-  "You are the assistant inside a VR app. You receive numbered excerpts from 10 SEBI (Securities and Exchange Board of India) " +
-  "enforcement orders about Reliance Industries, plus a user question that may or may not be about them.\n" +
+  "You are the assistant inside a VR app. You receive numbered excerpts from the user's uploaded documents " +
+  "(for example SEBI enforcement orders about Reliance Industries), plus a user question that may or may not be about them.\n" +
   "Rules:\n" +
   "1. If the excerpts contain the answer (fully or partly), answer from them and cite like [1], [2]. " +
   "Your FIRST line must be exactly: SOURCE: PDF [n, m] (the excerpt numbers you used, most important first).\n" +
@@ -244,6 +256,6 @@ export async function serverSearch(index, query, k = 8) {
       const chunk = index.data.chunks[h.i];
       return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw };
     });
-    return { mode: j.mode, hits };
+    return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits };
   } catch { return null; }
 }

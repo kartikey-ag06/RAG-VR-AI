@@ -3,3 +3,7 @@ uvicorn>=0.29
 fastembed>=0.4
 numpy>=1.26
 requests>=2.31
+python-multipart>=0.0.9
+pymupdf>=1.24
+python-docx>=1.1
+pillow>=10.1

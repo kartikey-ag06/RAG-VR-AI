@@ -12,3 +12,4 @@ __pycache__/
 # python backend
 backend/.venv/
 backend/cache/
+backend/data/

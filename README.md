@@ -40,6 +40,17 @@
 - The API stays the same (`/api/grok`, `/api/stt`, `/api/grok/status`) plus a new **`/api/search`**. If the Python backend is not running, the app falls back to TF-IDF in the browser.
 - No Python? Use `START_VR_RAG_POWERSHELL.bat`, the old server with keyword search only.
 
+## Upload documents (no more copying files into docs/)
+- Open **http://localhost:8765/upload**, or click **＋ Upload docs** in the VR app. Drag and drop **PDF, Word (.docx) or TXT** files (up to 50 MB each).
+- Files are stored on the server in `backend/data/files/` and processed automatically in the background:
+  1. Text is extracted (PyMuPDF for PDF, python-docx for Word, plain text for TXT).
+  2. Each page gets an image. PDF pages are rendered; Word and TXT text is drawn as A4 "pages", so the VR panel can show them too.
+  3. The text is cut into chunks, then the keyword index is rebuilt and the embeddings for the new file are computed. Embeddings are cached per file.
+- The VR app checks `/api/index/version` before every question and reloads the documents when they changed. No restart needed.
+- Delete a document on the upload page and it disappears from search. Uploading the exact same file twice is rejected.
+- First run: the 10 PDFs in `docs/` are imported automatically, so nothing changes for existing users.
+- Scanned PDFs with no text layer are marked "No text found". OCR is not supported yet.
+
 ---
 
 Ask a question, and the app finds the matching text in 10 SEBI enforcement orders.
