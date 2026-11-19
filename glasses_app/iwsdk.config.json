@@ -10,7 +10,7 @@
   },
   "world": {
     "xr": {
-      "mode": "vr",
+      "mode": "ar",
       "offer": "always",
       "features": {
         "handTracking": true,
@@ -53,7 +53,8 @@
     "emulator": {
       "device": "metaVRGlasses",
       "activation": "localhost",
-      "injectOnBuild": true
+      "injectOnBuild": true,
+      "environment": "kitchen"
     },
     "targetDevicePreview": {
       "gazeSimulation": "head"

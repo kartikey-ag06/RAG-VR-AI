@@ -149,6 +149,11 @@ export async function answerSmart(question, hits, cfg) {
   catch (e) {
     return { text: `AI error (${cfg.provider}): ${e.message}\n\n` + (hits.length ? extractive(question, hits) : ""), mode: "offline", cited: hits.map((_, i) => i) };
   }
+  return parseSmart(raw, hits);
+}
+
+/** Reads the "SOURCE: PDF [n]" / "SOURCE: GENERAL" first line and the cited excerpt numbers. */
+function parseSmart(raw, hits) {
   const m = raw.match(/^\s*SOURCE:\s*(PDF|GENERAL)\s*(\[[^\]]*\])?\s*/i);
   let body = (m ? raw.slice(m[0].length) : raw).trim()
     .replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1").replace(/^#+\s*/gm, "").replace(/^\s*[-*]\s+/gm, "• "); // plain text for the VR panel
@@ -258,4 +263,56 @@ export async function serverSearch(index, query, k = 8) {
     });
     return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits };
   } catch { return null; }
+}
+
+// ---------------- ProcOps: every question is a bug report for the page ----------------
+/** Logs a question + the page it was answered from to the ProcOps dashboard (/procops).
+ *  Fire-and-forget: never throws, never blocks the answer (the PowerShell server simply returns 404). */
+export function logProcOps(event) {
+  try {
+    fetch("/api/procops/event", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(event), keepalive: true }).catch(() => {});
+  } catch { /* ignore */ }
+}
+
+// ---------------- Scan, then ask: photo + question ----------------
+/** Is a vision model available on the backend? -> { available, model, reason } */
+export async function visionStatus() {
+  try {
+    const r = await fetch("/api/vision/status", { signal: AbortSignal.timeout(8000) });
+    return r.ok ? await r.json() : { available: false, reason: "this server has no photo support" };
+  } catch { return { available: false, reason: "backend not reachable" }; }
+}
+
+/** photo -> { object, text_seen, keywords } (used to search the documents) */
+export const VR_VIEW_HINT = "This image is a frame of what the user sees through their smart glasses / VR headset " +
+  "(the real world around them, or a 3D scene). " +
+  "The red ring marks the centre of their view: describe the object inside or nearest to the red ring, not the ring itself.";
+
+export async function describePhoto(image, hint = "") {
+  const r = await fetch("/api/vision/describe", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image, hint }), signal: AbortSignal.timeout(60000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || "HTTP " + r.status);
+  return j;
+}
+
+const VISION_SYSTEM = SMART_SYSTEM +
+  "\n5. The user also took a PHOTO with their smart glasses. You get a description of it from a vision model " +
+  "(you do not see the photo yourself). Start with what the object is, then the key facts about it. " +
+  "Only use SOURCE: PDF when an excerpt really is about this object or question.";
+
+/** Same result shape as answerSmart: { text, mode, cited }.
+ *  Only ONE vision call per photo (describePhoto); the answer comes from the normal chat model using that
+ *  description, which keeps the scan inside Groq's free-tier tokens-per-minute limit. */
+export async function answerVision(question, photoInfo, hits, image, hint = "", cfg = { provider: "groq" }) {
+  const seen = "PHOTO DESCRIPTION (from the vision model): " + (photoInfo.object || "unknown object") + ". " +
+    (photoInfo.details ? photoInfo.details + " " : "") + "Text on it: " + (photoInfo.text_seen || "none") + ".\n\n";
+  const user = seen + (hits.length ? buildPrompt(question, hits.slice(0, 6)) : "Excerpts: (none matched)\n\nQuestion: " + question);
+  let raw;
+  try { raw = await callLlm(VISION_SYSTEM, user, cfg.provider === "none" ? { provider: "groq" } : cfg); }
+  catch (e) {
+    return { text: `I see: ${photoInfo.object}. ${photoInfo.details || ""}\n\n(AI answer failed: ${e.message})`, mode: "general", cited: [] };
+  }
+  return parseSmart(raw, hits.slice(0, 6));
 }

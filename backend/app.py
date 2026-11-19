@@ -11,6 +11,8 @@ What it does
   6. /upload      : web page to upload PDF / DOCX / TXT; files are stored + indexed in backend/data/
      /api/files   : list (GET), upload (POST), delete (DELETE /api/files/<uid>)
      /rag/index.json, /rag/pages/... : served from the document store, so the VR app always sees the uploads
+  7. /procops     : ProcOps dashboard - question heatmap per page, AI-drafted fix, approve -> new version (procops.py)
+  8. /api/vision/* : photo + question ("scan, then ask") via a Groq vision model (vision.py)
 
 Embeddings
   Model: BAAI/bge-small-en-v1.5 via fastembed (ONNX, CPU, no PyTorch). Downloaded once (~70 MB).
@@ -293,6 +295,37 @@ async def stt(req: Request):
     return r.json()
 
 
+# ---------------------------------------------------------------- ProcOps (question log, heatmap, AI redline, versions)
+def llm_complete(messages, max_tokens=1200):
+    """Server-side chat call used by ProcOps. Returns the reply text or raises."""
+    p = provider()
+    if not p:
+        raise RuntimeError("no API key in grok_api_key.txt")
+    model = chat_model()
+    payload = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
+    if "gpt-oss" in model:
+        payload["reasoning_effort"] = "low"
+    r = requests.post(f"{p['base']}/chat/completions", json=payload,
+                      headers={"Authorization": f"Bearer {get_key()}"}, timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"{p['name']} API: HTTP {r.status_code} - {r.text[:300]}")
+    return r.json()["choices"][0]["message"]["content"] or ""
+
+
+try:
+    import procops
+    procops.register(app, STORE, llm_complete, ROOT)
+except Exception as _e:  # ProcOps must never stop the main app from starting
+    print(f"[procops] disabled: {_e}", flush=True)
+
+
+try:
+    import vision
+    vision.register(app, provider, get_key, list_models, ROOT)   # "scan, then ask" (photo questions)
+except Exception as _e:
+    print(f"[vision] disabled: {_e}", flush=True)
+
+
 @app.post("/api/server/stop")
 def stop():
     threading.Timer(0.5, lambda: os._exit(0)).start()
@@ -318,6 +351,7 @@ if __name__ == "__main__":
     print(f"AI: {'ON - ' + p['name'] if p else 'OFF - put a Groq key in grok_api_key.txt'}")
     print(f"Search: hybrid (TF-IDF + {EMBED_MODEL}) - embeddings load in the background")
     print(f"Upload documents at http://localhost:{port}/upload  (stored in {DATA_DIR})")
+    print(f"ProcOps dashboard at http://localhost:{port}/procops")
     threading.Thread(target=load_embeddings, daemon=True).start()
     if "--no-browser" not in sys.argv:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}/")).start()

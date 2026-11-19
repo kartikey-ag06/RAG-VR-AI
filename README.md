@@ -85,3 +85,24 @@ Put them in `docs/`. Then run `pip install pymupdf` and `python rag_pipeline/bui
 ## Why not double-click index.html?
 WebXR needs a secure origin (https or http://localhost), and the browser blocks `fetch()` on `file://`.
 That is why the .bat starts a local server.
+
+## ProcOps (new) - every job is a test run of the manual
+Open **http://localhost:8765/procops** while the app runs (or click **ProcOps** in the glasses panel).
+1. **Run** - every question asked in the glasses is logged with the document + page it was answered from (page = procedure step).
+2. **Detect** - the dashboard shows a friction heatmap: pages that cause the most questions are red. Questions no document answers appear under *Content gaps*.
+3. **Fix** - click a red page → **Draft fix with AI** (Groq rewrites the page, with the questions as evidence and self-checks) → edit if needed → enter your name → **Approve & publish**. The page becomes v1.1: the glasses show the revised page and answer from it. The change log shows questions before → after the fix.
+- **Reset demo** restores all original pages and archives the question log (nothing is deleted).
+- Data lives in `backend/data/procops/` and `backend/data/revisions/` (git-ignored). Code: `backend/procops.py`, `backend/static/procops.html`.
+
+## Scan, then ask (photo questions)
+Click **📷 Scan** in the glasses panel → allow the webcam (it stands in for the glasses camera) → **Capture photo**, or **Upload a photo instead**.
+Then type or speak a question, or just press **Enter** ("What is this, and what do my documents say about it?").
+1. A Groq vision model reads the photo (what the object is + any text on it).
+2. Your documents are searched with the question + those words.
+3. The vision model answers from the photo + the matching excerpts. If a document page is used, it is shown as usual.
+- The photo stays attached for follow-up questions; click ✕ to remove it. Photos are never saved.
+- The vision model is picked automatically from your Groq account (override: put a model id in `vision_model.txt`).
+- Photo questions also appear in the ProcOps dashboard, tagged `[photo: ...]`.
+- Code: `backend/vision.py`, `glasses_app/src/camera.js`.
+- **🔍 Scan (VR view):** look at an object in the VR scene so it sits in the red ring, then click **🔍 Scan** (or press **X**). The app grabs that view (its own panels hidden), the AI says what the object is, and the answer + a thumbnail appear on the VR answer panel, which moves in front of you. Code: `glasses_app/src/vrscan.js`.
+- **Real-world simulation:** the app now starts a passthrough (AR) session. Click **Enter XR** and you look through the glasses at a realistic simulated room (default: kitchen) instead of the studio set. Change the room with the sofa icon in the emulator toolbar (Bedroom, Office, Living Room...). Look at an object so it is in the red ring and press **🔍 Scan / X** - the scan includes the simulated room. (To go back to the old VR studio: set `"mode": "vr"` in `glasses_app/iwsdk.config.json` and rebuild.)

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProcOps - every job is a test run of the manual</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --warn:#e0a63a; --bad:#e5596b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  h1 { font-size: 22px; margin: 0; } h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin: 2px 0 18px; }
+  a.btn, button { display:inline-block; border:1px solid var(--line); background:#1a2540; color:var(--text);
+    padding:7px 13px; border-radius:8px; text-decoration:none; cursor:pointer; font:inherit; font-size:13px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color:#06101f; font-weight:600; }
+  button.go { background: var(--ok); border-color: var(--ok); color:#04150b; font-weight:600; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 16px; min-width:150px; }
+  .stat b { display:block; font-size:24px; } .stat span { color:var(--muted); font-size:12px; }
+  .loop { display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px; margin-bottom:18px; flex-wrap:wrap; }
+  .loop i { font-style:normal; background:#16203a; border:1px solid var(--line); padding:3px 10px; border-radius:12px; color:var(--text); }
+  .grid { display:grid; grid-template-columns: minmax(340px, 1fr) minmax(420px, 1.35fr); gap:18px; align-items:start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  h2 { font-size:15px; margin:0 0 10px; display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  h2 small { color:var(--muted); font-weight:400; font-size:12px; }
+  .doc { padding:10px 0; border-top:1px solid var(--line); } .doc:first-of-type { border-top:none; }
+  .doc .t { display:flex; justify-content:space-between; gap:8px; font-size:13px; }
+  .doc .t b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ver { font-size:11px; padding:1px 7px; border-radius:9px; background:#1d2740; color:var(--muted); white-space:nowrap; }
+  .ver.rev { background:#14351f; color:var(--ok); }
+  .cells { display:flex; flex-wrap:wrap; gap:3px; margin-top:7px; }
+  .cell { width:15px; height:15px; border-radius:3px; background:#1a2338; cursor:pointer; position:relative; border:1px solid transparent; }
+  .cell.fixed { border-color: var(--ok); }
+  .cell.sel { outline:2px solid #fff; outline-offset:1px; }
+  .hotlist { margin-top:6px; font-size:12px; color:var(--muted); }
+  .hotlist a { color:var(--text); cursor:pointer; text-decoration:none; margin-right:10px; white-space:nowrap; }
+  .hotlist a:hover { text-decoration:underline; }
+  .legend { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px; }
+  .legend .cell { cursor:default; width:12px; height:12px; }
+  .empty { color:var(--muted); font-size:13px; padding:16px 0; }
+  .detail-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap:wrap; }
+  .pg { display:flex; gap:14px; margin-top:12px; flex-wrap:wrap; }
+  .pg img { width:230px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:zoom-in; }
+  .pg .qs { flex:1; min-width:220px; }
+  .q { display:flex; gap:8px; padding:5px 0; border-bottom:1px dashed #223050; font-size:13px; }
+  .q .n { flex:0 0 auto; background:#3a2d10; color:var(--warn); border-radius:9px; padding:0 7px; font-size:11px; font-weight:600; height:18px; margin-top:2px; }
+  .muted { color:var(--muted); } .small { font-size:12px; }
+  #draft { margin-top:16px; border-top:1px solid var(--line); padding-top:14px; }
+  .issue { background:#2b1f0d; border:1px solid #5a4214; border-radius:8px; padding:8px 12px; font-size:13px; margin-bottom:10px; }
+  .checks { display:flex; flex-direction:column; gap:3px; margin:8px 0 12px; font-size:13px; }
+  .pass { color:var(--ok); } .fail { color:var(--bad); }
+  .diff { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  @media (max-width: 700px) { .diff { grid-template-columns: 1fr; } }
+  .diff label { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  pre, textarea { width:100%; height:300px; margin:4px 0 0; padding:10px; border-radius:8px; border:1px solid var(--line);
+    background:#0d1220; color:var(--text); font:12.5px/1.5 Consolas, "Segoe UI", monospace; white-space:pre-wrap; overflow:auto; resize:vertical; }
+  pre { color:#aab3c5; }
+  textarea { border-color:#2e5a3f; }
+  .approve { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  input[type=text] { padding:7px 10px; border-radius:8px; border:1px solid var(--line); background:#0d1220; color:var(--text); font:inherit; font-size:13px; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  tr:last-child td { border-bottom:none; }
+  .down { color:var(--ok); font-weight:600; }
+  .row2 { display:grid; grid-template-columns: 1.35fr 1fr; gap:18px; margin-top:18px; }
+  @media (max-width: 900px) { .row2 { grid-template-columns: 1fr; } }
+  #toast { position:fixed; bottom:20px; right:20px; background:#14351f; color:#d7f5e3; border:1px solid var(--ok);
+    padding:10px 16px; border-radius:10px; display:none; max-width:420px; }
+  #toast.err { background:#3b1219; border-color:var(--bad); color:#ffd9de; }
+  #zoom { position:fixed; inset:0; background:rgba(0,0,0,.8); display:none; align-items:center; justify-content:center; z-index:9; cursor:zoom-out; }
+  #zoom img { max-height:95vh; max-width:95vw; background:#fff; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1><span>ProcOps</span> · DevOps for physical work</h1>
+      <div class="sub">Every job done is a test run of the manual. A worker's question is a bug report for the page.</div>
+    </div>
+    <div>
+      <a class="btn" href="/" target="_blank">Open glasses app</a>
+      <a class="btn" href="/upload" target="_blank">Upload docs</a>
+      <button id="reset" title="Restore all original pages and archive the question log">Reset demo</button>
+    </div>
+  </header>
+
+  <div class="loop"><i>1 · Run</i> questions asked in the glasses are logged per page →
+    <i>2 · Detect</i> the heatmap shows where the manual causes friction →
+    <i>3 · Fix</i> AI drafts a redline, a human approves it → new version live in the glasses</div>
+
+  <div class="stats">
+    <div class="stat"><b id="s-events">-</b><span>questions logged</span></div>
+    <div class="stat"><b id="s-hot">-</b><span>pages with open questions</span></div>
+    <div class="stat"><b id="s-fixed">-</b><span>approved revisions</span></div>
+    <div class="stat"><b id="s-gaps">-</b><span>questions the docs don't cover</span></div>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Friction heatmap <span class="legend">fewer <span class="cell" style="background:#1a2338"></span><span class="cell" style="background:#6b4a12"></span><span class="cell" style="background:#b8621a"></span><span class="cell" style="background:#e5596b"></span> more · <span class="cell fixed"></span> fixed</span></h2>
+      <div id="docs"><div class="empty">Loading...</div></div>
+    </section>
+    <section class="card" id="detail">
+      <div class="empty">Ask questions in the glasses app, then click a red page in the heatmap to see why workers struggle there and draft a fix.</div>
+    </section>
+  </div>
+
+  <div class="row2">
+    <section class="card">
+      <h2>Change log <small>versioned like pull requests</small></h2>
+      <div id="history"><div class="empty">No revisions approved yet.</div></div>
+    </section>
+    <section class="card">
+      <h2>Content gaps <small>answered by general AI, not by any document</small></h2>
+      <div id="gaps"><div class="empty">None yet.</div></div>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+<div id="zoom"><img alt=""></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let data = null, sel = null, drafting = false, draft = null, lastSig = '';
+
+function toast(msg, err) {
+  const t = $('toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => (t.style.display = 'none'), err ? 7000 : 4000);
+}
+function heat(n, max) {
+  if (!n) return '#1a2338';
+  const r = n / Math.max(max, 1);
+  return r > 0.75 ? '#e5596b' : r > 0.4 ? '#b8621a' : '#6b4a12';
+}
+const when = (iso) => iso ? new Date(iso).toLocaleString() : '';
+
+async function load() {
+  try {
+    const r = await fetch('/api/procops/summary', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+  } catch (e) { $('docs').innerHTML = `<div class="empty">Backend not reachable (${esc(e.message)}). Start START_VR_RAG.bat.</div>`; return; }
+  render();
+}
+
+function render() {
+  const docs = data.docs;
+  const hotPages = docs.reduce((a, d) => a + d.hot.filter((p) => p.open > 0).length, 0);
+  const fixes = docs.reduce((a, d) => a + d.history.length, 0);
+  $('s-events').textContent = data.events; $('s-hot').textContent = hotPages;
+  $('s-fixed').textContent = fixes; $('s-gaps').textContent = data.gaps.length;
+  const max = Math.max(1, ...docs.flatMap((d) => d.hot.map((p) => p.open)));
+
+  const active = docs.filter((d) => d.hot.length);
+  const quiet = docs.length - active.length;
+  $('docs').innerHTML = (active.length ? '' : '<div class="empty">No questions logged yet. Ask something in the glasses app.</div>') +
+    active.map((d) => {
+      const byPage = Object.fromEntries(d.hot.map((p) => [p.page, p]));
+      const cells = Array.from({ length: d.pages }, (_, i) => {
+        const p = byPage[i + 1], n = p ? p.open : 0;
+        const tip = `page ${i + 1}: ${n} open question${n === 1 ? '' : 's'}` + (p && p.rev ? ` · fixed in v${p.rev}` : '');
+        const isSel = sel && sel.uid === d.uid && sel.page === i + 1;
+        return `<span class="cell${p && p.rev ? ' fixed' : ''}${isSel ? ' sel' : ''}" title="${tip}" style="background:${heat(n, max)}" data-uid="${d.uid}" data-page="${i + 1}"></span>`;
+      }).join('');
+      const top = d.hot.filter((p) => p.open).sort((a, b) => b.open - a.open).slice(0, 5)
+        .map((p) => `<a data-uid="${d.uid}" data-page="${p.page}">p.${p.page} · ${p.open}</a>`).join('');
+      return `<div class="doc"><div class="t"><b title="${esc(d.title)}">${esc(d.title)}</b>
+        <span><span class="ver${d.version !== '1.0' ? ' rev' : ''}">v${d.version}</span> <span class="muted small">${d.open} open</span></span></div>
+        <div class="cells">${cells}</div>${top ? `<div class="hotlist">Hottest: ${top}</div>` : ''}</div>`;
+    }).join('') + (quiet ? `<div class="empty">${quiet} other document${quiet === 1 ? '' : 's'} with no questions yet.</div>` : '');
+
+  const hist = docs.flatMap((d) => d.history.map((h) => {
+    const p = d.hot.find((x) => x.page === h.page);
+    return { ...h, title: d.title, uid: d.uid, after: p ? p.open : 0 };
+  })).sort((a, b) => b.approved.localeCompare(a.approved));
+  $('history').innerHTML = hist.length ? `<table><tr><th>Version</th><th>Document · page</th><th>Change</th><th>Questions before → after</th></tr>` +
+    hist.map((h) => `<tr><td><span class="ver rev">v${esc(h.version)}</span><div class="muted small">${esc(when(h.approved))}</div></td>
+      <td>${esc(h.title)} · <a href="#" data-uid="${h.uid}" data-page="${h.page}" style="color:var(--accent)">p.${h.page}</a></td>
+      <td>${esc(h.summary)}<div class="muted small">approved by ${esc(h.approver || 'unknown')}</div></td>
+      <td><span class="${h.after < h.evidence ? 'down' : ''}">${h.evidence} → ${h.after}</span></td></tr>`).join('') + '</table>'
+    : '<div class="empty">No revisions approved yet.</div>';
+
+  $('gaps').innerHTML = data.gaps.length ? '<table><tr><th>Question</th><th>Asked</th></tr>' +
+    data.gaps.map((g) => `<tr><td>${esc(g.q)}</td><td>${g.n}×</td></tr>`).join('') + '</table>'
+    : '<div class="empty">None yet. Questions that no document answers will appear here - they show what is missing from the manuals.</div>';
+
+  if (sel && !drafting && !draft) {
+    const sig = JSON.stringify(current().p) + data.indexVersion;
+    if (sig !== lastSig) renderDetail();
+  }
+}
+
+function current() {
+  const d = data && data.docs.find((x) => x.uid === sel.uid);
+  const p = d && (d.hot.find((x) => x.page === sel.page) || { page: sel.page, open: 0, before: 0, distinct: 0, rev: null, questions: [] });
+  return { d, p };
+}
+
+function renderDetail() {
+  const { d, p } = current();
+  if (!d) return;
+  lastSig = JSON.stringify(p) + data.indexVersion;
+  const img = `/api/procops/page/${d.uid}/${p.page}?t=${data.indexVersion}`;
+  $('detail').innerHTML = `
+    <div class="detail-head"><div><h2 style="margin:0">${esc(d.title)} · page ${p.page}</h2>
+      <div class="muted small">Document v${d.version}${p.rev ? ` · this page revised in v${p.rev}` : ' · original page'}
+      · ${p.open} open question${p.open === 1 ? '' : 's'}${p.before ? ` · ${p.before} before the fix` : ''}</div></div>
+      <button class="primary" id="btn-draft" ${p.open ? '' : 'disabled title="No open questions on this page"'}>✎ Draft fix with AI</button></div>
+    <div class="pg"><img src="${img}" alt="page ${p.page}" id="pgimg">
+      <div class="qs"><div class="muted small" style="margin-bottom:4px">What workers asked on this page${p.rev ? ' (since the fix)' : ''}:</div>
+      ${p.questions.length ? p.questions.map((q) => `<div class="q"><span class="n">${q.n}×</span><span>${esc(q.q)}</span></div>`).join('')
+        : '<div class="empty">No open questions.' + (p.rev ? ' The fix seems to work.' : '') + '</div>'}</div></div>
+    <div id="draft"></div>`;
+  $('pgimg').onclick = () => { $('zoom').querySelector('img').src = img; $('zoom').style.display = 'flex'; };
+  const b = $('btn-draft'); if (b && p.open) b.onclick = makeDraft;
+  if (draft) showDraft();
+}
+
+async function makeDraft() {
+  const b = $('btn-draft'); b.disabled = true; b.textContent = 'AI is reading the page and the questions...';
+  drafting = true;
+  try {
+    const r = await fetch('/api/procops/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sel) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+    draft = j; showDraft();
+  } catch (e) { toast(e.message, true); }
+  drafting = false; b.disabled = false; b.textContent = '✎ Draft fix with AI';
+}
+
+function showDraft() {
+  const x = draft;
+  $('draft').innerHTML = `
+    <h2 style="margin-bottom:6px">Proposed change → v${esc(x.next_version)} <small>review, edit, then approve</small></h2>
+    <div class="issue"><b>Issue found:</b> ${esc(x.issue)}</div>
+    <div class="small muted">Evidence: ${x.evidence.length} worker question${x.evidence.length === 1 ? '' : 's'} · Changes: ${esc(x.change_summary.join('; '))}</div>
+    <div class="checks">${x.checks.map((c) => `<span class="${c.pass ? 'pass' : 'fail'}">${c.pass ? '✔' : '✖'} ${esc(c.check)}${c.note ? ` <span class="muted">- ${esc(c.note)}</span>` : ''}</span>`).join('')}
+      <span class="muted small">AI checks are a first pass. The approver is responsible for the final text.</span></div>
+    <div class="diff"><div><label>Current page</label><pre>${esc(x.original_text)}</pre></div>
+      <div><label>Proposed page (editable)</label><textarea id="newtext">${esc(x.revised_text)}</textarea></div></div>
+    <div class="approve"><input type="text" id="approver" placeholder="Approver name" value="${esc(localStorage.getItem('procops-approver') || '')}">
+      <button class="go" id="btn-approve">✔ Approve & publish v${esc(x.next_version)}</button><button id="btn-discard">Discard</button></div>`;
+  $('btn-discard').onclick = () => { draft = null; renderDetail(); };
+  $('btn-approve').onclick = approve;
+}
+
+async function approve() {
+  const approver = $('approver').value.trim();
+  if (!approver) { toast('Enter the approver name - every change needs a human sign-off.', true); $('approver').focus(); return; }
+  try { localStorage.setItem('procops-approver', approver); } catch (e) {}
+  const b = $('btn-approve'); b.disabled = true; b.textContent = 'Publishing...';
+  try {
+    const r = await fetch('/api/procops/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...sel, text: $('newtext').value, approver, summary: draft.change_summary.join('; ') || draft.issue, evidence: draft.evidence.length }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+    draft = null;
+    toast(`v${j.approved.version} published. The glasses now show and answer from the fixed page.`);
+    setTimeout(load, 1500);
+  } catch (e) { toast(e.message, true); b.disabled = false; b.textContent = 'Approve & publish'; }
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-uid]');
+  if (!t) return;
+  e.preventDefault();
+  const next = { uid: t.dataset.uid, page: +t.dataset.page };
+  if (draft && (next.uid !== sel.uid || next.page !== sel.page) && !confirm('Discard the unsaved draft?')) return;
+  if (!sel || next.uid !== sel.uid || next.page !== sel.page) draft = null;
+  sel = next; render(); renderDetail();
+});
+$('zoom').onclick = () => ($('zoom').style.display = 'none');
+$('reset').onclick = async () => {
+  if (!confirm('Reset the demo? All pages go back to their original version (revisions are archived) and the question log is archived.')) return;
+  await fetch('/api/procops/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: true }) });
+  sel = null; draft = null; $('detail').innerHTML = '<div class="empty">Demo reset. Ask questions in the glasses app.</div>';
+  toast('Demo reset.'); setTimeout(load, 1200);
+};
+load();
+setInterval(() => { if (!document.hidden) load(); }, 4000);
+</script>
+</body>
+</html>

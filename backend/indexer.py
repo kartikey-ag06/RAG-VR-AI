@@ -83,8 +83,9 @@ def _font(size):
         return ImageFont.load_default()
 
 
-def render_text_page(text, title, page_no, total, out_path):
-    """Draws a page of plain text as a white 'paper' image, so DOCX/TXT show in VR like a PDF page."""
+def render_text_page(text, title, page_no, total, out_path, banner=None):
+    """Draws a page of plain text as a white 'paper' image, so DOCX/TXT show in VR like a PDF page.
+    banner: optional line shown in a green band (used by ProcOps for an approved revision)."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (IMG_W, IMG_H), "white")
     d = ImageDraw.Draw(img)
@@ -94,6 +95,10 @@ def render_text_page(text, title, page_no, total, out_path):
     y += 46
     d.line((margin, y, IMG_W - margin, y), fill=(200, 200, 200), width=2)
     y += 24
+    if banner:
+        d.rectangle((margin, y, IMG_W - margin, y + 44), fill=(222, 245, 230), outline=(46, 125, 79), width=2)
+        d.text((margin + 14, y + 10), banner[:80], fill=(30, 100, 60), font=_font(20))
+        y += 64
     for para in text.split("\n"):
         line = ""
         for word in para.split():
@@ -178,6 +183,14 @@ class Store:
         for p in (self.files, self.pages, self.emb):
             p.mkdir(parents=True, exist_ok=True)
         self.manifest_path = root / "manifest.json"
+        self.revs_dir = root / "revisions"          # ProcOps: approved page revisions, <uid>.json
+        self.revs_dir.mkdir(parents=True, exist_ok=True)
+        self.revs = {}
+        for f in self.revs_dir.glob("*.json"):
+            try:
+                self.revs[f.stem] = json.loads(f.read_text("utf-8"))
+            except Exception as ex:
+                print(f"[procops] bad revision file {f.name}: {ex}", flush=True)
         self.lock = threading.RLock()
         self.queue = []
         self.wake = threading.Event()
@@ -229,6 +242,9 @@ class Store:
         shutil.rmtree(self.pages / uid, ignore_errors=True)
         for f in self.emb.glob(f"{uid}_*.npy"):
             f.unlink(missing_ok=True)
+        with self.lock:
+            self.revs.pop(uid, None)
+        (self.revs_dir / f"{uid}.json").unlink(missing_ok=True)
         self.request_rebuild()
         return True
 
@@ -236,10 +252,79 @@ class Store:
         """Maps the VR app's positional URL d{doc}_p{page}.jpg to the stored image."""
         uids = self.snapshot["uids"]
         if 0 <= doc_pos < len(uids):
-            p = self.pages / uids[doc_pos] / f"p{page:03d}.jpg"
+            return self.page_image_uid(uids[doc_pos], page)
+        return None
+
+    # ---------- ProcOps: versioned page revisions
+    def page_image_uid(self, uid, page, original=False):
+        rev = None if original else self.revs.get(uid, {}).get("pages", {}).get(str(page))
+        if rev:
+            p = self.pages / uid / rev["image"]
             if p.exists():
                 return p
-        return None
+        p = self.pages / uid / f"p{page:03d}.jpg"
+        return p if p.exists() else None
+
+    def doc_entry(self, uid):
+        with self.lock:
+            e = next((x for x in self.manifest if x["uid"] == uid), None)
+            return dict(e) if e else None
+
+    def revisions(self, uid):
+        with self.lock:
+            r = self.revs.get(uid)
+            return json.loads(json.dumps(r)) if r else {"version": "1.0", "pages": {}, "history": []}
+
+    def page_text(self, uid, page, original=False):
+        """Current text of a page (the approved revision if any)."""
+        if not original:
+            rev = self.revs.get(uid, {}).get("pages", {}).get(str(page))
+            if rev:
+                return rev["text"]
+        f = self.pages / uid / "text.json"
+        if not f.exists():
+            return None
+        texts = json.loads(f.read_text("utf-8"))
+        return texts[page - 1] if 1 <= page <= len(texts) else None
+
+    def add_revision(self, uid, page, text, summary="", approver="", evidence=0):
+        e = self.doc_entry(uid)
+        if not e or e["status"] != "ready":
+            raise ValueError("document not found")
+        if not (1 <= page <= e["pages"]):
+            raise ValueError("page out of range")
+        with self.lock:
+            r = self.revisions(uid)
+            major, minor = (int(x) for x in r["version"].split("."))
+            version = f"{major}.{minor + 1}"
+            n = len(r["history"]) + 1
+            when = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            image = f"p{page:03d}_r{n}.jpg"
+            render_text_page(text, e["title"], page, e["pages"], self.pages / uid / image,
+                             banner=f"REVISED v{version} - approved {when[:10]}" + (f" by {approver}" if approver else ""))
+            rec = {"n": n, "version": version, "page": page, "summary": summary[:500], "approver": approver[:80],
+                   "approved": when, "evidence": int(evidence)}
+            r["version"] = version
+            r["pages"][str(page)] = {"text": text, "version": version, "image": image, "approved": when}
+            r["history"].append(rec)
+            self.revs[uid] = r
+            tmp = self.revs_dir / f"{uid}.tmp"
+            tmp.write_text(json.dumps(r, indent=1), "utf-8")
+            tmp.replace(self.revs_dir / f"{uid}.json")
+        self.request_rebuild()
+        return rec
+
+    def clear_revisions(self, uid=None):
+        """Back to the original documents (demo reset). Revision files are archived, not deleted."""
+        with self.lock:
+            uids = [uid] if uid else list(self.revs)
+            for u in uids:
+                self.revs.pop(u, None)
+                f = self.revs_dir / f"{u}.json"
+                if f.exists():
+                    f.replace(self.revs_dir / f"{u}.{int(time.time())}.bak")
+        self.request_rebuild()
+        return uids
 
     def request_rebuild(self):
         self.queue.append("__rebuild__")
@@ -307,8 +392,13 @@ class Store:
         index_docs, chunks, chunk_doc_uid = [], [], []
         for pos, e in enumerate(docs):
             texts = json.loads((self.pages / e["uid"] / "text.json").read_text("utf-8"))
+            rev = self.revs.get(e["uid"], {})
+            for pno, pr in rev.get("pages", {}).items():         # ProcOps: approved revisions replace the page
+                if 1 <= int(pno) <= len(texts):
+                    texts[int(pno) - 1] = pr["text"]
+            e["_revn"] = len(rev.get("history", []))
             index_docs.append({"id": pos, "file": e["name"], "title": e["title"], "pages": len(texts),
-                               "type": e["type"], "uid": e["uid"]})
+                               "type": e["type"], "uid": e["uid"], "rev": rev.get("version", "1.0")})
             for pno, t in enumerate(texts, start=1):
                 for c in chunk_page(t):
                     chunks.append({"doc": pos, "page": pno, "text": c})
@@ -346,7 +436,7 @@ class Store:
         parts = []
         for e in docs:
             texts = [c["text"] for c, u in zip(chunks, chunk_doc_uid) if u == e["uid"]]
-            f = self.emb / f"{e['uid']}_{tag}.npy"
+            f = self.emb / (f"{e['uid']}_{tag}.npy" if not e.get("_revn") else f"{e['uid']}_{tag}_r{e['_revn']}.npy")
             m = np.load(f) if f.exists() else None
             if m is None or m.shape[0] != len(texts):
                 m = np.array(list(self.embedder.passage_embed(texts, batch_size=32)), dtype=np.float32) if texts \
