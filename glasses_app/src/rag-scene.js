@@ -10,53 +10,91 @@ import { RagIndex, pageImageUrl, loadLlmConfig, answerSmart, serverSearch, serve
 import { captureVrView, addAimRing, hideStudioInPassthrough } from './vrscan.js';
 import { setupVoice } from './voice.js';
 import { setupCamera } from './camera.js';
+import { setupApps, APPS } from './apps.js';
 
 const PHOTO_Q = 'What is this, and what do my documents say about it?';
 const VIEW_Q = 'What is the object in the middle of my view? Give key facts about it.';
 
-const SAMPLES = [
+const EXAMPLES = [
   'What penalty was imposed on Reliance Industries?',
   'Why was Reliance penalised for diluted earnings per share disclosure?',
-  'What did Reliance Petroleum do in the futures and cash market in 2007?',
-  'What did the Bombay High Court order say?',
   'What is insider trading in simple words?',
 ];
 
 export function setupRag(world) {
   const state = { photoHint: '', photo: null, photoImg: null, photoInfo: null, usedPhoto: false, vision: null, index: null, llm: null, hits: [], hitIdx: 0, doc: -1, page: 1, busy: false, query: '', answer: '', mode: '', status: 'Loading...' };
 
-  // ---------- DOM overlay (desktop typing box) ----------
+  // ---------- DOM overlay: voice-only control panel (top-left) + apps drawer (right) ----------
   const ui = document.createElement('div');
   ui.innerHTML = `
     <style>
-      #rag-ui{position:fixed;top:10px;left:10px;width:380px;max-height:calc(100% - 20px);overflow:auto;z-index:2147483000;
-        background:rgba(15,20,32,.93);border:1px solid #2a3550;border-radius:10px;padding:12px;color:#e8e8e8;font:13px Segoe UI,Arial,sans-serif}
-      #rag-ui h1{font-size:15px;margin:0 0 4px;color:#8cc8ff} #rag-upl,#rag-po{font-size:11px;color:#8cc8ff;margin-left:6px;text-decoration:none;border:1px solid #3a4766;border-radius:6px;padding:2px 7px} #rag-upl:hover,#rag-po:hover{background:#26345a} #rag-status{font-size:11px;color:#8a93a6;margin-bottom:8px}
-      #rag-q{width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #3a4766;background:#0d1220;color:#fff;font-size:13px}
-      #rag-ui button{margin:5px 5px 0 0;padding:5px 9px;border-radius:6px;border:1px solid #3a4766;background:#1b2540;color:#dfe8ff;cursor:pointer;font-size:11px}
-      #rag-ans{white-space:pre-wrap;margin-top:10px;line-height:1.4} #rag-src{white-space:pre-wrap;margin-top:8px;color:#ffd98a;font-size:11px}
-      #rag-ui .k{font-size:10px;color:#7d879c;margin-top:8px} #rag-ui.min #rag-body{display:none}
-      #rag-row{display:flex;gap:6px} #rag-row #rag-q{flex:1} #rag-mic{margin:0 !important;white-space:nowrap;font-size:12px !important}
-      #rag-mic.rec{background:#7a1f2b !important;border-color:#c0394f !important;animation:ragpulse 1s infinite}
-      @keyframes ragpulse{50%{opacity:.6}} #rag-cam,#rag-scan{margin:0 !important;white-space:nowrap;font-size:12px !important} #rag-scan{background:#2a3f6e !important}
-      #rag-photo{display:none;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:#cfe3ff;background:#16203a;border:1px solid #2f4470;border-radius:8px;padding:4px}
-      #rag-photo img{width:54px;height:40px;object-fit:cover;border-radius:5px} #rag-photo button{margin:0 0 0 auto !important} #rag-voice{font-size:11px;color:#ffb3c0;min-height:14px;margin-top:4px}
+      #rag-ui{position:fixed;top:12px;left:12px;width:340px;max-height:calc(100% - 24px);overflow:auto;z-index:2147483000;box-sizing:border-box;
+        background:rgba(13,18,30,.94);border:1px solid #26324d;border-radius:14px;padding:14px;color:#e6eaf2;font:13px/1.45 "Segoe UI",Arial,sans-serif;
+        box-shadow:0 8px 28px rgba(0,0,0,.35)}
+      #rag-ui button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid #30406a;background:#18213a;color:#dfe8ff}
+      #rag-ui button:hover:not(:disabled){background:#22305a} #rag-ui button:disabled{opacity:.45;cursor:not-allowed}
+      .rg-hd{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+      .rg-hd b{font-size:15px;color:#8cc8ff} .rg-hd span{font-size:11px;color:#8a95ab;flex:1}
+      #rag-min{width:26px;height:26px;padding:0;font-size:14px}
+      #rag-ui.min #rag-body{display:none} #rag-ui.min .rg-hd{margin:0}
+      #rag-mic{width:100%;padding:16px 10px;font-size:16px !important;font-weight:600;background:linear-gradient(180deg,#2b5cff,#2447c9) !important;
+        border-color:#4d74ff !important;color:#fff !important;border-radius:14px !important}
+      #rag-mic.rec{background:linear-gradient(180deg,#d6334f,#a8213a) !important;border-color:#ff6b84 !important;animation:ragpulse 1s infinite}
+      @keyframes ragpulse{50%{opacity:.7}}
+      #rag-voice{font-size:12px;color:#a9b6d3;min-height:17px;margin:6px 2px 0;text-align:center}
+      .rg-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+      .rg-row button{padding:9px 4px;font-size:12px}
+      #rag-scan{background:#1d3566 !important}
+      #rag-photo{display:none;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#cfe3ff;background:#141d33;border:1px solid #2f4470;border-radius:10px;padding:5px}
+      #rag-photo img{width:54px;height:40px;object-fit:cover;border-radius:6px} #rag-photo span{flex:1} #rag-photo button{width:26px;height:26px;padding:0}
+      #rag-ans{white-space:pre-wrap;margin-top:12px;padding-top:10px;border-top:1px solid #222d47;line-height:1.5}
+      #rag-src{white-space:pre-wrap;margin-top:8px;color:#ffd98a;font-size:11.5px}
+      .rg-ft{margin-top:12px;padding-top:8px;border-top:1px solid #222d47;font-size:11px;color:#7d879c;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+      .rg-ft a{color:#8cc8ff;text-decoration:none} .rg-ft a:hover{text-decoration:underline}
+      #rag-status{width:100%}
+      #rag-drawer{position:fixed;top:12px;right:12px;width:300px;max-height:calc(100% - 24px);overflow:auto;z-index:2147483000;box-sizing:border-box;
+        background:rgba(13,18,30,.96);border:1px solid #26324d;border-radius:14px;padding:14px;color:#e6eaf2;font:13px/1.45 "Segoe UI",Arial,sans-serif;
+        box-shadow:0 8px 28px rgba(0,0,0,.35);transform:translateX(calc(100% + 24px));transition:transform .2s ease}
+      #rag-drawer.open{transform:none}
+      #rag-drawer h3{margin:0 0 10px;font-size:15px;color:#8cc8ff;display:flex;justify-content:space-between;align-items:center}
+      #rag-drawer button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid #30406a;background:#18213a;color:#dfe8ff}
+      #rag-drawer button:hover{background:#22305a}
+      .rg-apps{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+      .rg-app{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px !important;font-size:11.5px !important}
+      .rg-app i{font-style:normal;font-size:22px}
+      #rag-step{display:none;margin-top:12px;background:#141d33;border:1px solid #2f4470;border-radius:10px;padding:10px;font-size:12px}
+      #rag-step ol{margin:6px 0 8px 18px;padding:0} #rag-step .go{width:100%;padding:9px;background:#2447c9 !important;border-color:#4d74ff !important;color:#fff;font-weight:600}
+      .rg-wins{margin-top:12px} .rg-wins h4{margin:0 0 6px;font-size:12px;color:#8a95ab;font-weight:600}
+      .rg-win{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#141d33;border-radius:8px;margin-bottom:5px}
+      .rg-win span{flex:1} .rg-win button{padding:3px 8px;font-size:11px}
+      .rg-note{font-size:11px;color:#7d879c;margin-top:10px}
     </style>
-    <div id="rag-ui"><h1>VR_RAG · Meta VR Glasses <button id="rag-min" title="hide/show">_</button> <a id="rag-upl" href="/upload" target="_blank" title="Upload PDF / DOCX / TXT">＋ Upload docs</a> <a id="rag-po" href="/procops" target="_blank" title="ProcOps: which pages confuse people, and fix them">ProcOps</a></h1>
-      <div id="rag-body"><div id="rag-status">Loading...</div>
-      <div id="rag-row"><input id="rag-q" placeholder="Ask about your documents, or anything... (Enter)" autocomplete="off"><button id="rag-mic" title="Click to talk, or hold V">🎤 Speak</button><button id="rag-scan" title="Scan the object in the middle of your VR view (red ring) - info appears in VR">🔍 Scan</button><button id="rag-cam" title="Use the webcam or upload a photo instead">📷</button></div>
-      <div id="rag-photo"><img id="rag-photo-img" alt=""><span id="rag-photo-txt">Photo attached - ask about it</span><button id="rag-photo-x" title="Remove photo">✕</button></div>
-      <div id="rag-voice"></div>
-      <div id="rag-samples"></div><div id="rag-ans"></div><div id="rag-src"></div>
-      <div class="k">Enter = ask · hold V or 🎤 = speak · 🔍 Scan = what is the object in the red ring (or press X) · 📷 = webcam / upload photo · Tab = next source · [ ] = PDF page · In glasses: pinch = next page, squeeze = next source</div></div></div>`;
+    <div id="rag-ui">
+      <div class="rg-hd"><b>VR_RAG</b><span>Meta VR Glasses · voice assistant</span><button id="rag-min" title="Hide / show">–</button></div>
+      <div id="rag-body">
+        <button id="rag-mic" title="Tap to talk (tap again to stop), or hold V">🎤 Tap to ask</button>
+        <div id="rag-voice">Hold <b>V</b> or tap the mic, then speak</div>
+        <div class="rg-row">
+          <button id="rag-scan" title="Scan the object in the red ring of your view (or press X)">🔍 Scan</button>
+          <button id="rag-cam" title="Use the webcam or upload a photo">📷 Photo</button>
+          <button id="rag-apps" title="Open apps (Chrome, WhatsApp, Instagram, Email...) as VR windows">☰ Apps</button>
+        </div>
+        <div id="rag-photo"><img id="rag-photo-img" alt=""><span id="rag-photo-txt">Photo attached</span><button id="rag-photo-x" title="Remove photo">✕</button></div>
+        <div id="rag-ans"></div><div id="rag-src"></div>
+        <div class="rg-ft"><span id="rag-status">Loading...</span><a href="/upload" target="_blank">＋ Upload docs</a><a href="/procops" target="_blank">ProcOps</a>
+          <span>V = talk · X = scan · Tab = next source · [ ] = page</span></div>
+      </div>
+    </div>
+    <div id="rag-drawer">
+      <h3>☰ Apps <button id="rag-apps-x" style="width:26px;height:26px;padding:0">✕</button></h3>
+      <div class="rg-apps" id="rag-applist"></div>
+      <div id="rag-step"></div>
+      <div class="rg-wins"><h4>Open in VR</h4><div id="rag-wins"><div class="rg-note">No app windows yet.</div></div></div>
+      <div class="rg-note">Apps are mirrored from a real Chrome tab: you see them live in VR, but click and type in the real tab.</div>
+    </div>`;
   document.body.appendChild(ui);
   const $ = (id) => document.getElementById(id);
   $('rag-min').onclick = () => $('rag-ui').classList.toggle('min');
-  SAMPLES.forEach((s, i) => {
-    const b = document.createElement('button');
-    b.textContent = `Sample ${i + 1}`; b.title = s; b.onclick = () => ask(s);
-    $('rag-samples').appendChild(b);
-  });
 
   // ---------- 3D panels ----------
   function makePanel(wPx, hPx, wM, pos, yaw) {
@@ -171,7 +209,7 @@ export function setupRag(world) {
     if (!q && state.photo) q = PHOTO_Q;               // photo attached + empty box = "what is this?"
     if (!q || state.busy || !state.index) return;
     const t0 = performance.now();
-    state.busy = true; state.query = q; $('rag-q').value = q;
+    state.busy = true; state.query = q;
     state.mode = ''; state.hits = []; state.hitIdx = 0; state.usedPhoto = false;
     if (state.photo) return askWithPhoto(q, t0);
     // R: retrieve up to 8 matching PDF chunks - hybrid (embeddings + TF-IDF) on the Python backend,
@@ -242,8 +280,6 @@ export function setupRag(world) {
     img.src = dataUrl;
     $('rag-photo-img').src = dataUrl; $('rag-photo-txt').textContent = 'Photo attached - type or speak a question, or press Enter';
     $('rag-photo').style.display = 'flex';
-    $('rag-q').placeholder = 'Ask about the photo... (Enter = "' + PHOTO_Q + '")';
-    $('rag-q').focus();
   }
   // After a scan the user may be facing anywhere: move both panels in front of their current view
   // (same layout as at start: answer left, PDF page right, slightly turned towards the user).
@@ -267,7 +303,7 @@ export function setupRag(world) {
     let shot;
     scanning = true;
     try {
-      const cap = await captureVrView(world, [ansP.mesh, pdfP.mesh], [$('rag-ui'), aimRing]);
+      const cap = await captureVrView(world, [ansP.mesh, pdfP.mesh, ...apps.meshes()], [$('rag-ui'), $('rag-drawer'), aimRing]);
       shot = cap.image; state.scanHow = cap.how;
     } catch (e) {
       state.answer = (e.name === 'NotAllowedError' ? 'Tab sharing was not allowed, so the room could not be captured. ' : 'Could not capture the VR view: ' + e.message + '. ') +
@@ -275,20 +311,54 @@ export function setupRag(world) {
       state.mode = 'offline'; syncDom(); return;
     }
     finally { scanning = false; }
-    const typed = $('rag-q').value.trim();
     setPhoto(shot, VR_VIEW_HINT);
     $('rag-photo-txt').textContent = 'VR view scanned';
     bringPanelsToView();
-    ask(typed && typed !== state.query ? typed : VIEW_Q);
+    ask(VIEW_Q);
   }
   $('rag-scan').onclick = scanView;
   window.addEventListener('keydown', (e) => {
-    if ((e.key === 'x' || e.key === 'X') && document.activeElement !== $('rag-q') && !e.repeat) scanView();
+    if ((e.key === 'x' || e.key === 'X') && !e.repeat && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) scanView();
   });
   const aimRing = addAimRing();
   hideStudioInPassthrough(world);
 
-  $('rag-photo-x').onclick = () => { setPhoto(null); $('rag-q').placeholder = 'Ask about your documents, or anything... (Enter)'; };
+  $('rag-photo-x').onclick = () => setPhoto(null);
+
+  // ---------- ☰ Apps: mirror real Chrome tabs (WhatsApp, Instagram, Email...) as VR windows ----------
+  const apps = setupApps({ world, onChange: renderWins });
+  function renderWins(list) {
+    $('rag-wins').innerHTML = list.length ? '' : '<div class="rg-note">No app windows yet.</div>';
+    list.slice().reverse().forEach((w, i) => {
+      const row = document.createElement('div'); row.className = 'rg-win';
+      row.innerHTML = `<span>${w.icon} ${w.name}${i === 0 ? ' <small style="color:#8a95ab">(in front)</small>' : ''}</span>`;
+      const fr = document.createElement('button'); fr.textContent = 'Front'; fr.title = 'Bring in front of you'; fr.onclick = () => apps.front(w.id);
+      const x = document.createElement('button'); x.textContent = '✕'; x.title = 'Close window'; x.onclick = () => apps.close(w.id);
+      if (i) row.appendChild(fr);
+      row.appendChild(x); $('rag-wins').appendChild(row);
+    });
+  }
+  function showStep(app) {
+    const st = $('rag-step'); st.style.display = 'block';
+    const opened = !!app.url;
+    st.innerHTML = `<b>${app.icon} ${app.name}</b><ol>` +
+      (opened ? `<li>${app.name} opened in a new Chrome tab - sign in there if needed.</li><li>Come back here and click <b>Show in VR</b>.</li><li>In Chrome's box, pick the <b>${app.name}</b> tab and click <b>Share</b>.</li>`
+        : `<li>Click <b>Show in VR</b>.</li><li>Pick any Chrome tab or window and click <b>Share</b>.</li>`) +
+      `</ol><button class="go" id="rag-step-go">Show ${app.name} in VR</button><div class="rg-note" id="rag-step-msg"></div>`;
+    $('rag-step-go').onclick = async () => {
+      try { await apps.open(app); st.style.display = 'none'; }
+      catch (e) { $('rag-step-msg').textContent = e.name === 'NotAllowedError' ? 'Sharing was cancelled.' : 'Could not show it: ' + e.message; }
+    };
+  }
+  APPS.forEach((app) => {
+    const b = document.createElement('button'); b.className = 'rg-app';
+    b.innerHTML = `<i>${app.icon}</i>${app.name}`; b.title = app.note || ('Open ' + app.name + ' and show it in VR');
+    b.onclick = () => { if (app.url) window.open(app.url, '_blank', 'noopener'); showStep(app); };
+    $('rag-applist').appendChild(b);
+  });
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)) $('rag-applist').insertAdjacentHTML('afterend', '<div class="rg-note">This browser cannot share tabs - use Chrome on a computer.</div>');
+  $('rag-apps').onclick = () => $('rag-drawer').classList.toggle('open');
+  $('rag-apps-x').onclick = () => $('rag-drawer').classList.remove('open');
 
   // Reloads index.json when the server's document set changed (upload page), so new files are searchable in VR.
   async function syncIndex() {
@@ -308,14 +378,8 @@ export function setupRag(world) {
   }
 
   // ---------- input ----------
-  $('rag-q').addEventListener('input', (e) => { state.query = e.target.value; drawAnswer(); });
-  $('rag-q').addEventListener('keydown', (e) => {
-    e.stopPropagation(); // keep typed letters away from the emulator's movement keys
-    if (e.key === 'Enter') { e.preventDefault(); ask(e.target.value); }
-    if (e.key === 'Tab') { e.preventDefault(); nextHit(); }
-  }, true);
   window.addEventListener('keydown', (e) => {
-    if (document.activeElement === $('rag-q')) return;
+    if (/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
     if (e.key === ']') showPage(state.doc, state.page + 1);
     else if (e.key === '[') showPage(state.doc, state.page - 1);
     else if (e.key === 'Tab') { e.preventDefault(); nextHit(); }
@@ -334,8 +398,9 @@ export function setupRag(world) {
       state.index = await RagIndex.load();
       state.llm = await loadLlmConfig();
       const d = state.index.data;
-      state.status = `${d.docs.length} docs · ${d.chunks.length} chunks · LLM: ${state.llm.provider}${state.llm.model ? ' (' + state.llm.model + ')' : ''} · search: ${state.llm.search || 'keyword (browser)'}`;
-      state.answer = 'Ask ANY question in the box (top-left) and press Enter.\nIf the answer is in the SEBI PDFs you will see the PDF page; otherwise you get a general AI answer.\n\nExamples:\n' + SAMPLES.map((s, i) => `${i + 1}. ${s}`).join('\n');
+      state.status = `${d.docs.length} docs · AI: ${state.llm.provider} · search: ${(state.llm.search || 'keyword').split(' ')[0]}`;
+      state.answer = 'Hold V (or tap the mic) and ASK by voice.\nIf the answer is in your documents you will see the page; otherwise you get a general AI answer.\n\nTry saying:\n' + EXAMPLES.map((s) => '• ' + s).join('\n') +
+        '\n\n🔍 Scan = what is the object in the red ring\n☰ Apps = Chrome, WhatsApp, Instagram, Email in VR';
     } catch (e) {
       state.status = 'ERROR: ' + e.message; state.answer = state.status;
     }
@@ -348,20 +413,23 @@ export function setupRag(world) {
       onState: (kind, msg) => {
         $('rag-voice').textContent = msg;
         if (kind === 'listening' || kind === 'transcribing') { state.query = '[mic] ' + msg; drawAnswer(); }
-        if (kind === 'error') { state.query = $('rag-q').value; drawAnswer(); }
+        if (kind === 'error') { state.query = ''; drawAnswer(); }
+        if (kind === 'done' && !msg) $('rag-voice').textContent = '';
       },
       onText: (text) => { $('rag-voice').textContent = 'Heard: "' + text + '"'; ask(text); },
+      label: '🎤 Tap to ask',
     });
-    state.status += ` · voice: ${v.mode === 'groq' ? 'Groq Whisper' : v.mode === 'browser' ? 'Chrome speech' : 'off'}`;
+    state.status += ` · voice: ${v.mode === 'groq' ? 'Whisper' : v.mode === 'browser' ? 'Chrome' : 'off'}`;
+    if (v.mode === 'none') { $('rag-mic').disabled = true; $('rag-voice').textContent = 'Voice needs Chrome with a microphone'; }
     syncDom();
 
     // ---------- camera (scan, then ask) ----------
-    setupCamera({ button: $('rag-cam'), onPhoto: setPhoto });
+    setupCamera({ button: $('rag-cam'), onPhoto: (p) => { setPhoto(p); ask(PHOTO_Q); } });
     state.vision = await visionStatus();
     if (!state.vision.available) for (const id of ['rag-cam', 'rag-scan']) { $(id).disabled = true; $(id).title = 'Photo questions unavailable: ' + state.vision.reason; }
     state.status += ` · photo: ${state.vision.available ? 'on' : 'off'}`;
     syncDom();
   })();
 
-  window.__vrRag = { state, ask, setPhoto, world }; // handy for debugging in DevTools
+  window.__vrRag = { state, ask, setPhoto, world, apps }; // handy for debugging in DevTools
 }

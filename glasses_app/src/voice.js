@@ -6,7 +6,8 @@ import { transcribe } from './rag.js';
 
 const MAX_SECONDS = 15;
 
-export function setupVoice({ button, onState, onText, useServer }) {
+export function setupVoice({ button, onState, onText, useServer, label }) {
+  const idleLabel = label || button.textContent;
   let rec = null, chunks = [], stream = null, timer = null, speech = null, active = false, startedAt = 0;
 
   const pickMime = () => ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
@@ -19,7 +20,7 @@ export function setupVoice({ button, onState, onText, useServer }) {
     if (active) return;
     if (mode === 'none') { onState('error', 'Voice not supported in this browser - use Chrome'); return; }
     active = true; startedAt = Date.now();
-    button.classList.add('rec'); button.textContent = '■ Stop';
+    button.classList.add('rec'); button.textContent = '■ Listening… tap to stop';
     if (mode === 'browser') return startBrowser();
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -78,7 +79,7 @@ export function setupVoice({ button, onState, onText, useServer }) {
 
   function reset() {
     active = false; clearTimeout(timer);
-    button.classList.remove('rec'); button.textContent = '🎤 Speak';
+    button.classList.remove('rec'); button.textContent = idleLabel;
   }
 
   // click = toggle

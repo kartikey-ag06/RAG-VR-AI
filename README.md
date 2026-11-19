@@ -106,3 +106,8 @@ Then type or speak a question, or just press **Enter** ("What is this, and what 
 - Code: `backend/vision.py`, `glasses_app/src/camera.js`.
 - **🔍 Scan (VR view):** look at an object in the VR scene so it sits in the red ring, then click **🔍 Scan** (or press **X**). The app grabs that view (its own panels hidden), the AI says what the object is, and the answer + a thumbnail appear on the VR answer panel, which moves in front of you. Code: `glasses_app/src/vrscan.js`.
 - **Real-world simulation:** the app now starts a passthrough (AR) session. Click **Enter XR** and you look through the glasses at a realistic simulated room (default: kitchen) instead of the studio set. Change the room with the sofa icon in the emulator toolbar (Bedroom, Office, Living Room...). Look at an object so it is in the red ring and press **🔍 Scan / X** - the scan includes the simulated room. (To go back to the old VR studio: set `"mode": "vr"` in `glasses_app/iwsdk.config.json` and rebuild.)
+
+## Voice-only panel + ☰ Apps (mirror windows)
+- The text box is gone: ask by **voice** only (hold **V** or tap the big mic button). 📷 Photo asks about the photo straight away.
+- **☰ Apps**: Chrome, WhatsApp, Instagram, Email (Gmail), YouTube, ProcOps, Upload. Click an app → it opens in a new Chrome tab (sign in there) → click **Show in VR** → pick that tab in Chrome's share box. The tab appears as a live window in VR (newest in front, older ones to the sides; **Front** / **✕** in the drawer).
+- Windows are **mirrors (view only)**: WhatsApp/Instagram/Gmail block being embedded in other pages, so you reply/click in the real tab. Code: `glasses_app/src/apps.js`.
