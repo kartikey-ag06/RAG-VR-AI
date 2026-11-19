@@ -1,110 +1,130 @@
 # 📖 User Manual: VR_RAG (Smart Glasses AI Assistant)
 
-Welcome to **VR_RAG**! This guide explains how to use the smart glasses AI assistant step-by-step. You don't need any special hardware or VR headset to try it—everything runs right inside your web browser.
+Welcome to **VR_RAG**! This user manual explains how to interact with the deployed smart glasses AI assistant directly in your web browser or inside a VR headset. No special hardware installation or technical setup is required.
 
 ---
 
-## 🚀 1. How to Launch the App
+## 🌐 1. Accessing the Application
 
-### Option A: Online (Deployed Website)
-Simply open the website URL provided (e.g. your Vercel link `https://your-app.vercel.app`) in Google Chrome, Edge, or Brave.
-
-### Option B: On Your Computer (Locally)
-1. Double-click the file named **`START_VR_RAG.bat`**.
-2. A window will open, and your web browser will automatically open to `http://localhost:8765`.
-3. Keep the black terminal window open while using the app.
-
----
-
-## 🥽 2. Entering VR / AR Mode
-
-Once the page loads, you will see a preview screen with the built-in **Meta VR Glasses simulator**:
-
-1. Click the **Enter XR** button (at the bottom or center of the screen).
-2. The view changes to a virtual room (like a kitchen or living room) through simulated smart glasses.
-3. You will see two floating screens in front of you:
-   - **Left Screen:** Shows the AI's direct answer with references.
-   - **Right Screen:** Displays the real document page where the answer was found.
+1. Open your deployed application URL in any modern web browser (Google Chrome, Microsoft Edge, or Brave):
+   ```text
+   https://<your-deployed-domain>.vercel.app
+   ```
+2. When prompted by your browser, click **Allow** for **Microphone access** (needed for hands-free voice questions).
+3. If using a physical VR headset (such as Meta Quest):
+   - Open the **Meta Quest Browser** inside the headset.
+   - Navigate to your deployed URL.
 
 ---
 
-## 🎮 3. How to Move & Look Around (Controls)
+## 🥽 2. Entering the VR / AR Experience
 
-You don't need a headset—your keyboard and mouse control everything:
+Once the web page loads:
 
-| Action | Control |
+1. Click the **Enter XR** button on the screen.
+2. You will be placed inside an augmented reality room (simulating what you see through Meta Smart Glasses).
+3. Two interactive floating panels will appear in your field of view:
+   - **Left / Center Panel:** Displays the AI-generated answer summary and source references.
+   - **Right Panel:** Displays the exact, high-resolution original document page where the answer was cited.
+
+---
+
+## 🎮 3. How to Navigate and Control
+
+### On Desktop / Laptop (Browser Simulator)
+No VR equipment is needed to test and use the app:
+
+| Action | How to do it |
 |---|---|
-| **Look around** | Click **Play Mode** (or click inside the view) to lock the mouse cursor. Move your mouse to look in any direction. Press **Esc** to release the mouse. |
-| **Move / Walk** | Hold **Left Shift** + use **W, A, S, D** keys to move your head around the room. |
-| **Change Virtual Room** | In the emulator toolbar at the top/side, click the **Sofa icon** to switch rooms (Kitchen, Office, Living Room, Bedroom). |
-| **Next Document Page** | Press **Right Arrow** or **Pinch** with virtual hands. |
-| **Previous Document Page** | Press **Left Arrow**. |
-| **Next Source Citation** | Press **Tab** or **Squeeze** with virtual hands. |
+| **Look around** | Click **Play Mode** (or click anywhere inside the 3D scene) to lock your cursor. Move your mouse to look in any direction. Press **Esc** at any time to release your mouse. |
+| **Move around the room** | Hold **Left Shift** + use **W, A, S, D** to walk around. |
+| **Switch Rooms** | Click the **Sofa icon** in the emulator toolbar to change the background environment (Kitchen, Office, Living Room, Bedroom). |
+| **Next / Previous Page** | Press **Right Arrow** / **Left Arrow** on your keyboard (or use the on-screen buttons). |
+| **Next Source Citation** | Press the **Tab** key to jump to the next cited document reference. |
+
+### On a Physical VR Headset
+- **Gaze / Head tracking:** Look naturally in any direction.
+- **Pinch (Index finger + Thumb):** Advance to the next document page.
+- **Squeeze / Grip:** Advance to the next cited source.
+- **Controllers:** Use the trigger button to turn pages and the grip button to cycle sources.
 
 ---
 
 ## 🗣️ 4. Asking Questions
 
-You can ask questions using your voice or by typing:
+### Method A: Voice Query (Hands-Free)
+1. **Hold the `V` key** on your keyboard (or click the **🎤 Speak** button in the VR panel).
+2. Ask your question naturally (for example: *"What were the penalties imposed by SEBI?"*).
+3. Release the key (or click the microphone icon again to stop).
+4. The cloud AI transcribes your speech with Whisper, searches your documents, and updates both the answer panel and document page in real time.
 
-### A. Ask by Voice (Recommended)
-1. **Hold the `V` key** on your keyboard (or tap the large **🎤 Speak** button).
-2. Speak your question clearly into your computer microphone.
-3. Release the key (or click the mic button again to stop).
-4. The AI transcribes your speech, searches your documents, and updates the floating VR panels automatically.
-> *Note: If your browser asks for microphone permission, click **Allow**.*
-
-### B. Ask by Typing
-- Type your question in the question box and press **Enter**.
-- Or click any of the **Sample Question** buttons to test immediate answers.
+### Method B: Text Query
+- Click into the question input field on the control panel, type your question, and press **Enter**.
+- You can also click any of the **Sample Question** buttons to test immediate responses.
 
 ---
 
-## 📷 5. "Scan, Then Ask" (Visual Questions)
+## 📷 5. "Scan, Then Ask" (Camera & Visual Recognition)
 
-You can show an object to the AI and ask questions about it:
+You can inspect real-world or virtual objects and ask questions about them:
 
-### In-VR Reticle Scan (Look & Scan)
-1. In VR, look at any object in the virtual room so it sits inside the **red circular ring** in the center of your view.
+### A. In-VR Viewfinder Scan (Look & Scan)
+1. In the 3D scene, look directly at an object so it sits inside the **red reticle ring** in the center of your view.
 2. Press the **X key** on your keyboard (or click **🔍 Scan**).
-3. The AI takes a snapshot through your glasses, identifies the object, checks your documents, and presents the answer right in front of your eyes.
+3. The AI takes a snapshot through your simulated glasses, recognizes the object, checks your document library, and places the answer directly in front of you.
 
-### Webcam or Photo Upload
-1. Click **📷 Photo** on the control panel.
-2. Choose **Capture Photo** (using your webcam) or **Upload a photo instead**.
-3. Ask your question by voice or text. The AI combines what it sees in the photo with information from your documents.
-
----
-
-## 📄 6. Uploading Your Own Documents
-
-To search through your own files instead of the sample documents:
-
-1. Click **＋ Upload docs** at the bottom of the screen (or visit `/upload` in your browser).
-2. Drag and drop any **PDF, Word (.docx), or Text (.txt)** file (up to 50 MB).
-3. The system automatically reads the text, creates page previews, and indexes the document.
-4. Go back to the VR app—your new documents are immediately available for questions without needing a restart!
+### B. Webcam or Photo Upload
+1. Click the **📷 Photo** button on the control panel.
+2. Choose **Capture Photo** (to take a photo with your computer's webcam) or **Upload a photo instead**.
+3. Ask your question by voice or text. The AI analyzes the image and synthesizes an answer using your documents.
+4. To dismiss an active photo, click the **✕** button on the photo preview thumbnail.
 
 ---
 
-## 🪟 7. Multi-App Windows (☰ Apps)
+## 📄 6. Uploading and Managing Documents
 
-The smart glasses app lets you mirror external websites and tools as floating windows in VR:
+You can add your own company manuals, legal documents, or procedure guides:
 
-1. Click the **☰ Apps** button on the panel.
-2. Pick any app: **Chrome, WhatsApp, Gmail, YouTube, ProcOps, or Upload**.
-3. It opens in a new tab. Click **Show in VR** and select that tab in Chrome's screen share prompt.
-4. The window will float inside your VR view so you can reference it while you work.
+1. Click **＋ Upload docs** at the bottom of the interface (or visit the `/upload` path on your deployed domain).
+2. Drag and drop any **PDF, Word (.docx), or Text (.txt)** file (up to 50 MB each).
+3. The cloud backend automatically:
+   - Extracts and indexes the text.
+   - Generates high-resolution A4 page images for the VR viewer.
+   - Calculates semantic embeddings for hybrid search.
+4. Return to your VR app—new documents are indexed and immediately queryable without reloading.
 
 ---
 
-## ❓ 8. Quick Troubleshooting & Tips
+## 📊 7. ProcOps Operations Dashboard
 
-- **The microphone isn't listening?**  
-  Look at your browser's address bar (near the URL lock icon) and ensure microphone access is set to **Allow**.
-- **Can't move the camera?**  
-  Click once inside the virtual room to enable mouse look. Press **Esc** on your keyboard whenever you want your mouse pointer back.
-- **Want to clear a photo question?**  
-  Click the small **✕** icon on the photo thumbnail in the control panel.
-- **Working with real VR headsets?**  
-  Open the deployed website directly inside your headset's browser (e.g. Meta Quest Browser) and click **Enter XR** for full 6DoF immersion.
+For managers and team leads monitoring standard operating procedures (SOPs):
+
+1. Click the **ProcOps** link (or navigate to `/procops` on your domain).
+2. **Friction Heatmap:** View which document pages and procedure steps trigger the highest number of questions from users.
+3. **Content Gaps:** Discover questions that users asked where no matching document answers existed.
+4. **AI-Assisted Fixes:** Click a high-friction page to have AI draft an updated, clearer procedure version and approve it for immediate publication to everyone's glasses.
+
+---
+
+## 🪟 8. Virtual Companion Apps (☰ Apps)
+
+The system supports multitasking by streaming companion web apps into floating VR windows:
+
+1. Click the **☰ Apps** menu button in the glasses interface.
+2. Select any service: **Chrome, WhatsApp, Gmail, YouTube, ProcOps, or Upload**.
+3. The service opens in a separate browser tab.
+4. Click **Show in VR** and select that tab in your browser's share prompt.
+5. The tab will float inside your VR view as a live companion window that you can reference while keeping your hands free.
+
+---
+
+## 💡 9. Tips & Troubleshooting
+
+- **Microphone not responding?**  
+  Ensure microphone permissions are enabled for your deployed domain in your browser settings (click the tune/lock icon in the address bar).
+- **Cursor locked in mouse-look mode?**  
+  Press the **Esc** key on your keyboard to release the mouse cursor back to normal.
+- **Audio cut off too soon?**  
+  Hold the **V** key for at least 1 second while speaking clearly.
+- **Optimal performance:**  
+  Use hardware-accelerated browsers (Chrome or Edge recommended) with WebGL enabled.
