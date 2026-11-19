@@ -7,12 +7,18 @@ shall will would should may might can could must do does did done have has had h
 i we you me us our your said also any all each other same per vide hereinafter thereof therein herein whereas
 page sebi noticee noticees order`.split(/\s+/).filter(Boolean));
 
+export const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+
+export function apiUrl(path) {
+  return API_BASE ? `${API_BASE}${path}` : path;
+}
+
 export function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter(t => t.length > 1 && !STOP.has(t));
 }
 
 export class RagIndex {
-  static async load(url = import.meta.env.BASE_URL + "rag/index.json") {
+  static async load(url = (API_BASE ? `${API_BASE}/` : import.meta.env.BASE_URL) + "rag/index.json") {
     const data = await (await fetch(url, { cache: "no-store" })).json();
     indexVersion = data.version || 0;
     const ix = new RagIndex();
@@ -54,13 +60,14 @@ export class RagIndex {
 // stops the browser from showing a cached image of a page that now belongs to another document.
 let indexVersion = 0;
 export function pageImageUrl(docId, page) {
-  return import.meta.env.BASE_URL + `rag/pages/d${String(docId).padStart(2, "0")}_p${String(page).padStart(3, "0")}.jpg?v=${indexVersion}`;
+  const base = API_BASE ? `${API_BASE}/` : import.meta.env.BASE_URL;
+  return base + `rag/pages/d${String(docId).padStart(2, "0")}_p${String(page).padStart(3, "0")}.jpg?v=${indexVersion}`;
 }
 
 /** Current index version on the server (null when the server has no upload support). */
 export async function serverIndexVersion() {
   try {
-    const r = await fetch("/api/index/version", { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    const r = await fetch(apiUrl("/api/index/version"), { cache: "no-store", signal: AbortSignal.timeout(3000) });
     return r.ok ? (await r.json()).version : null;
   } catch { return null; }
 }
@@ -77,7 +84,7 @@ export async function loadLlmConfig() {
   if (cfg.provider === "auto" || cfg.provider === "grok") {
     // Grok via our local server (server.ps1 holds the API key, the browser never sees it)
     try {
-      const r = await fetch("/api/grok/status", { signal: AbortSignal.timeout(1500) });
+      const r = await fetch(apiUrl("/api/grok/status"), { signal: AbortSignal.timeout(1500) });
       const st = await r.json();
       cfg.search = st.search || ""; cfg.backend = st.backend || "powershell";
       if (st.configured) { cfg.provider = st.provider || "grok"; cfg.model = st.model; cfg.stt = !!st.stt; return cfg; }
@@ -169,7 +176,7 @@ function parseSmart(raw, hits) {
 async function callLlm(system, user, cfg) {
   let r, j;
   if (cfg.provider === "grok" || cfg.provider === "groq") {
-    r = await fetch("/api/grok", { method: "POST", headers: { "Content-Type": "application/json" },
+    r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
     j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
@@ -193,7 +200,7 @@ export async function generate(question, hits, cfg) {
   try {
     let r, j;
     if (cfg.provider === "grok" || cfg.provider === "groq") {
-      r = await fetch("/api/grok", {
+      r = await fetch(apiUrl("/api/grok"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }] })
       });
@@ -242,7 +249,7 @@ export async function generate(question, hits, cfg) {
 // ---------------- Voice: speech-to-text ----------------
 /** Sends recorded audio to the local server, which forwards it to Groq Whisper. Returns the text. */
 export async function transcribe(blob) {
-  const r = await fetch("/api/stt", { method: "POST", headers: { "Content-Type": blob.type || "audio/webm" }, body: blob });
+  const r = await fetch(apiUrl("/api/stt"), { method: "POST", headers: { "Content-Type": blob.type || "audio/webm" }, body: blob });
   const j = await r.json();
   if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
   return (j.text || "").trim();
@@ -253,7 +260,7 @@ export async function transcribe(blob) {
  *  or null when the backend is not there (PowerShell server / offline) so the caller can fall back. */
 export async function serverSearch(index, query, k = 8) {
   try {
-    const r = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await fetch(apiUrl("/api/search"), { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, k }), signal: AbortSignal.timeout(8000) });
     if (!r.ok) return null;
     const j = await r.json();
@@ -270,7 +277,7 @@ export async function serverSearch(index, query, k = 8) {
  *  Fire-and-forget: never throws, never blocks the answer (the PowerShell server simply returns 404). */
 export function logProcOps(event) {
   try {
-    fetch("/api/procops/event", { method: "POST", headers: { "Content-Type": "application/json" },
+    fetch(apiUrl("/api/procops/event"), { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(event), keepalive: true }).catch(() => {});
   } catch { /* ignore */ }
 }
@@ -279,7 +286,7 @@ export function logProcOps(event) {
 /** Is a vision model available on the backend? -> { available, model, reason } */
 export async function visionStatus() {
   try {
-    const r = await fetch("/api/vision/status", { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(apiUrl("/api/vision/status"), { signal: AbortSignal.timeout(8000) });
     return r.ok ? await r.json() : { available: false, reason: "this server has no photo support" };
   } catch { return { available: false, reason: "backend not reachable" }; }
 }
@@ -290,7 +297,7 @@ export const VR_VIEW_HINT = "This image is a frame of what the user sees through
   "The red ring marks the centre of their view: describe the object inside or nearest to the red ring, not the ring itself.";
 
 export async function describePhoto(image, hint = "") {
-  const r = await fetch("/api/vision/describe", { method: "POST", headers: { "Content-Type": "application/json" },
+  const r = await fetch(apiUrl("/api/vision/describe"), { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image, hint }), signal: AbortSignal.timeout(60000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(j.error || "HTTP " + r.status);

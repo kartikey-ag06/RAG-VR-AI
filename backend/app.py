@@ -32,10 +32,15 @@ import webbrowser
 from collections import Counter
 from pathlib import Path
 
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 import numpy as np
 import requests
 import uvicorn
 from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -49,6 +54,19 @@ W_SEMANTIC = 1.0      # weight of the embedding ranking
 W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "13,00,00,000")
 
 app = FastAPI(title="VR_RAG backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def on_startup():
+    threading.Thread(target=load_embeddings, daemon=True).start()
 
 # ---------------------------------------------------------------- document store (uploads) + TF-IDF
 DATA_DIR = ROOT / "backend" / "data"
@@ -78,6 +96,8 @@ EMB = {"state": "warming", "model": None, "error": None}
 
 
 def load_embeddings():
+    if EMB.get("state") == "ready":
+        return
     t0 = time.time()
     try:
         from fastembed import TextEmbedding
@@ -333,7 +353,8 @@ def stop():
 
 
 # static app last, so /api/* wins
-app.mount("/", StaticFiles(directory=str(APP_DIR), html=True), name="app")
+if APP_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(APP_DIR), html=True), name="app")
 
 
 def free_port(start=8765):
@@ -345,14 +366,16 @@ def free_port(start=8765):
 
 
 if __name__ == "__main__":
-    port = free_port()
+    env_port = os.environ.get("PORT")
+    port = int(env_port) if env_port else free_port()
+    host = "0.0.0.0" if env_port else "127.0.0.1"
     p = provider()
-    print(f"VR_RAG (python backend) running at http://localhost:{port}/  (close this window to stop)")
+    print(f"VR_RAG (python backend) running at http://{host}:{port}/  (close this window to stop)")
     print(f"AI: {'ON - ' + p['name'] if p else 'OFF - put a Groq key in grok_api_key.txt'}")
     print(f"Search: hybrid (TF-IDF + {EMBED_MODEL}) - embeddings load in the background")
-    print(f"Upload documents at http://localhost:{port}/upload  (stored in {DATA_DIR})")
-    print(f"ProcOps dashboard at http://localhost:{port}/procops")
+    print(f"Upload documents at http://{host}:{port}/upload  (stored in {DATA_DIR})")
+    print(f"ProcOps dashboard at http://{host}:{port}/procops")
     threading.Thread(target=load_embeddings, daemon=True).start()
-    if "--no-browser" not in sys.argv:
+    if "--no-browser" not in sys.argv and not env_port:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}/")).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
