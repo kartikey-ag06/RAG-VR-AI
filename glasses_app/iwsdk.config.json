@@ -52,7 +52,7 @@
   "dev": {
     "emulator": {
       "device": "metaVRGlasses",
-      "activation": "localhost",
+      "activation": "always",
       "injectOnBuild": true,
       "environment": "kitchen"
     },
