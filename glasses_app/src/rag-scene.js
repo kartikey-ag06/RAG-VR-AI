@@ -9,6 +9,7 @@ import { Mesh, PlaneGeometry, MeshBasicMaterial, CanvasTexture, SRGBColorSpace, 
 import { RagIndex, pageImageUrl, loadLlmConfig, answerSmart, serverSearch, serverIndexVersion, logProcOps, answerVision, describePhoto, visionStatus, VR_VIEW_HINT } from './rag.js';
 import { captureVrView, addAimRing, hideStudioInPassthrough } from './vrscan.js';
 import { setupVoice } from './voice.js';
+import { VRVoicePlayer } from './tts-player.js';
 import { setupCamera } from './camera.js';
 import { setupApps, APPS } from './apps.js';
 
@@ -22,7 +23,8 @@ const EXAMPLES = [
 ];
 
 export function setupRag(world) {
-  const state = { photoHint: '', photo: null, photoImg: null, photoInfo: null, usedPhoto: false, vision: null, index: null, llm: null, hits: [], hitIdx: 0, doc: -1, page: 1, busy: false, query: '', answer: '', mode: '', status: 'Loading...' };
+  const voice = new VRVoicePlayer();
+  const state = { photoHint: '', photo: null, photoImg: null, photoInfo: null, usedPhoto: false, vision: null, index: null, llm: null, hits: [], hitIdx: 0, doc: -1, page: 1, busy: false, speakAnswers: true, query: '', answer: '', mode: '', status: 'Loading...' };
 
   // ---------- DOM overlay: voice-only control panel (top-left) + apps drawer (right) ----------
   const ui = document.createElement('div');
@@ -77,6 +79,7 @@ export function setupRag(world) {
         <div class="rg-row">
           <button id="rag-scan" title="Scan the object in the red ring of your view (or press X)">🔍 Scan</button>
           <button id="rag-cam" title="Use the webcam or upload a photo">📷 Photo</button>
+          <button id="rag-speak" title="Read answers aloud (on/off)">🔊 Voice on</button>
           <button id="rag-apps" title="Open apps (Chrome, WhatsApp, Instagram, Email...) as VR windows">☰ Apps</button>
         </div>
         <div id="rag-photo"><img id="rag-photo-img" alt=""><span id="rag-photo-txt">Photo attached</span><button id="rag-photo-x" title="Remove photo">✕</button></div>
@@ -178,7 +181,18 @@ export function setupRag(world) {
     tex.needsUpdate = true;
   }
 
+  // LRU cache of decoded page images: bounded so many pages cannot exhaust a headset's memory
+  const MAX_CACHED_PAGES = 6;
   const cache = new Map();
+  const cacheGet = (url) => { const v = cache.get(url); if (v) { cache.delete(url); cache.set(url, v); } return v; };
+  const cacheSet = (url, img) => {
+    cache.set(url, img);
+    while (cache.size > MAX_CACHED_PAGES) {
+      const oldest = cache.keys().next().value, old = cache.get(oldest);
+      cache.delete(oldest);
+      if (old && old.close) old.close();                // release decoded bitmap if the browser supports it
+    }
+  };
   function showPage(docId, page) {
     if (!state.index || docId < 0) return;
     const doc = state.index.data.docs[docId];
@@ -188,9 +202,9 @@ export function setupRag(world) {
     const ver = doc.rev && doc.rev !== '1.0' ? ` v${doc.rev}` : '';
     const cap = `${doc.title}${ver}  |  page ${page}/${doc.pages}  (pinch = next)`;
     const done = (img) => { if (state.doc === docId && state.page === page) drawPdf(img, cap); };
-    if (cache.has(url)) return done(cache.get(url));
+    if (cache.has(url)) return done(cacheGet(url));
     const img = new Image();
-    img.onload = () => { cache.set(url, img); done(img); };
+    img.onload = () => { cacheSet(url, img); done(img); };
     img.onerror = () => drawPdf(null, 'Missing image ' + url);
     img.src = url;
   }
@@ -225,8 +239,15 @@ export function setupRag(world) {
     state.searchMode = srv ? srv.mode : 'keyword (browser)';
     state.answer = state.llm.provider === 'none' ? 'Searching the PDFs...' : `Asking ${state.llm.provider}...`;
     syncDom();
-    const res = await answerSmart(q, found, state.llm); // G: AI answers from PDFs or general knowledge
+    voice.stop();                                       // barge-in: a new question cuts off the previous spoken answer
+    let lastDraw = 0;
+    const res = await answerSmart(q, found, state.llm, (partial) => {   // tokens stream into the panel as they arrive
+      state.answer = partial || state.answer;
+      const now = performance.now();
+      if (now - lastDraw > 120) { lastDraw = now; syncDom(); }
+    });                                                 // G: AI answers from PDFs or general knowledge
     state.answer = res.text; state.mode = res.mode;
+    if (state.speakAnswers) voice.speak(res.text);
     state.hits = res.cited.map((i) => found[i]);       // only the chunks the AI actually used
     if (state.hits.length) showPage(state.hits[0].doc.id, state.hits[0].chunk.page);
     else { state.doc = -1; drawPdf(null, res.mode === 'general' ? 'No PDF page - this answer is general knowledge' : 'No matching PDF page'); }
@@ -259,6 +280,7 @@ export function setupRag(world) {
       state.answer = `I see: ${info.object || 'an object'}. Checking your documents...`; syncDom();
       const res = await answerVision(q, info, found, photo, state.photoHint, state.llm);
       state.answer = res.text; state.mode = res.mode;
+      if (state.speakAnswers) { voice.stop(); voice.speak(res.text); }
       state.hits = res.cited.map((i) => found[i]);
       if (state.hits.length) showPage(state.hits[0].doc.id, state.hits[0].chunk.page);
       else { state.doc = -1; drawPdf(null, res.mode === 'general' ? 'No PDF page - answered from the photo + general knowledge' : 'No matching PDF page'); }
@@ -317,6 +339,11 @@ export function setupRag(world) {
     ask(VIEW_Q);
   }
   $('rag-scan').onclick = scanView;
+  $('rag-speak').onclick = () => {
+    state.speakAnswers = !state.speakAnswers;
+    $('rag-speak').textContent = state.speakAnswers ? '🔊 Voice on' : '🔇 Voice off';
+    if (!state.speakAnswers) voice.stop();
+  };
   window.addEventListener('keydown', (e) => {
     if ((e.key === 'x' || e.key === 'X') && !e.repeat && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) scanView();
   });
@@ -412,6 +439,7 @@ export function setupRag(world) {
       useServer: !!(state.llm && state.llm.stt),
       onState: (kind, msg) => {
         $('rag-voice').textContent = msg;
+        if (kind === 'listening') voice.stop();   // barge-in: talking cuts off the spoken answer
         if (kind === 'listening' || kind === 'transcribing') { state.query = '[mic] ' + msg; drawAnswer(); }
         if (kind === 'error') { state.query = ''; drawAnswer(); }
         if (kind === 'done' && !msg) $('rag-voice').textContent = '';

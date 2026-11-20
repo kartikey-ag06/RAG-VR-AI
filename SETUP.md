@@ -10,6 +10,10 @@
    The first run sets up the Python backend once, in 2-5 minutes. No Python? Use `START_VR_RAG_POWERSHELL.bat`, which has keyword search only.
 5. Open http://localhost:8765 in Chrome. Type or speak (hold V) a question, then click **Enter XR**.
 
+   Alternative: put `GROQ_API_KEY=gsk_...` in a `.env` file in the project root (also git-ignored), or set the environment variable.
+   Spoken answers (`/api/tts`) need internet access (Microsoft Edge neural voices). Without it the browser's own voice is used.
+   If Windows Application Control blocks PyMuPDF, PDFs are read with `pypdfium2` instead (plain text, no table layout).
+
 ## Change the code
 - VR app source: `glasses_app/src/`. To rebuild it, install Node.js 22+, then:
   `cd glasses_app`, `npm install`, `npm run build`

@@ -20,6 +20,7 @@ Embeddings
 
 Run:  START_VR_RAG.bat   (or: python backend/app.py)
 """
+import asyncio
 import json
 import math
 import os
@@ -41,7 +42,8 @@ import requests
 import uvicorn
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 
 from indexer import Store, tokenize
@@ -52,6 +54,20 @@ EMBED_MODEL = os.environ.get("VR_RAG_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 RRF_K = 60            # standard RRF constant
 W_SEMANTIC = 1.0      # weight of the embedding ranking
 W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "13,00,00,000")
+
+def _load_dotenv():
+    """Reads KEY=VALUE lines from .env (project root or backend/) into os.environ (existing variables win)."""
+    for f in (ROOT / ".env", BACKEND_DIR / ".env"):
+        if f.exists():
+            for line in f.read_text(encoding="utf-8-sig").splitlines():
+                m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
+                if m and not line.lstrip().startswith("#"):
+                    os.environ.setdefault(m.group(1), m.group(2).strip("\"'"))
+
+
+_load_dotenv()
+RERANK_CANDIDATES = 20   # hybrid search keeps this many, the cross-encoder reranker cuts them to k
+RERANK_MODEL = os.environ.get("VR_RAG_RERANK_MODEL", "ms-marco-TinyBERT-L-2-v2")
 
 app = FastAPI(title="VR_RAG backend")
 
@@ -67,6 +83,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     threading.Thread(target=load_embeddings, daemon=True).start()
+    threading.Thread(target=get_ranker, daemon=True).start()      # download/load the reranker before the first question
 
 # ---------------------------------------------------------------- document store (uploads) + TF-IDF
 DATA_DIR = ROOT / "backend" / "data"
@@ -118,6 +135,45 @@ def ranks(scores):
     return r
 
 
+# ---------------------------------------------------------------- cross-encoder reranker (FlashRank, ONNX, CPU)
+RERANK = {"state": "idle", "ranker": None, "error": None}
+_rerank_lock = threading.Lock()
+
+
+def get_ranker():
+    with _rerank_lock:
+        if RERANK["state"] == "idle":
+            try:
+                from flashrank import Ranker
+                RERANK.update(ranker=Ranker(model_name=RERANK_MODEL, cache_dir=str(ROOT / "backend" / "cache" / "rerank")),
+                              state="ready")
+            except Exception as e:
+                RERANK.update(state="failed", error=str(e))
+                print(f"[rerank] disabled, using RRF order only: {e}", flush=True)
+        return RERANK["ranker"]
+
+
+def rerank(query, hits, chunks, k):
+    """Re-scores the RRF candidates with a cross-encoder. Returns the top k hits, or None if unavailable."""
+    ranker = get_ranker()
+    if ranker is None or len(hits) < 2:
+        return None
+    try:
+        from flashrank import RerankRequest
+        passages = [{"id": j, "text": chunks[h["i"]]["text"]} for j, h in enumerate(hits)]
+        out = ranker.rerank(RerankRequest(query=query, passages=passages))
+        res = []
+        for p in out[:k]:
+            h = dict(hits[int(p["id"])])
+            h["rrf"] = h["score"]
+            h["score"] = float(p["score"])
+            res.append(h)
+        return res
+    except Exception as e:
+        print(f"[rerank] failed, using RRF order: {e}", flush=True)
+        return None
+
+
 @app.post("/api/search")
 async def search(req: Request):
     body = await req.json()
@@ -127,17 +183,31 @@ async def search(req: Request):
     if not query or not n:
         return {"mode": "none", "version": snap["version"], "hits": []}
     kw = tfidf_scores(snap, query)
-    matrix = snap["matrix"]
-    if EMB["state"] != "ready" or matrix is None or matrix.shape[0] != n:
+    matrix, col = snap["matrix"], snap.get("qdrant")
+    if EMB["state"] != "ready" or (col is None and (matrix is None or matrix.shape[0] != n)):
         order = [int(i) for i in np.argsort(-kw)[:k] if kw[i] > 0]
         return {"mode": "keyword", "version": snap["version"], "embeddings": EMB["state"],
                 "hits": [{"i": i, "score": float(kw[i]), "kw": float(kw[i]), "sem": None} for i in order]}
     q = np.array(list(EMB["model"].query_embed([query]))[0], dtype=np.float32)
-    sem = matrix @ (q / np.linalg.norm(q))
+    q = q / np.linalg.norm(q)
+    if col is not None:                                   # Qdrant nearest-neighbour search (cosine)
+        pos = snap["idpos"]
+        res = await asyncio.to_thread(lambda: col.query_points(snap["qname"], query=q.tolist(), limit=min(n, 200)).points)
+        sem = np.full(n, -1.0, dtype=np.float32)          # chunks outside Qdrant's top 200 rank behind all returned ones
+        for p in res:
+            j = pos.get(str(p.id))
+            if j is not None:
+                sem[j] = p.score
+    else:
+        sem = matrix @ q
     rrf = W_SEMANTIC / (RRF_K + ranks(sem)) + W_KEYWORD * (kw > 0) / (RRF_K + ranks(kw))
-    order = [int(i) for i in np.argsort(-rrf)[:k]]
-    return {"mode": "hybrid", "model": EMBED_MODEL, "version": snap["version"],
-            "hits": [{"i": i, "score": float(rrf[i]), "sem": float(sem[i]), "kw": float(kw[i])} for i in order]}
+    order = [int(i) for i in np.argsort(-rrf)[:max(k, RERANK_CANDIDATES)]]
+    hits = [{"i": i, "score": float(rrf[i]), "sem": float(sem[i]), "kw": float(kw[i])} for i in order]
+    reranked = await asyncio.to_thread(rerank, query, hits, snap["index"]["chunks"], k)
+    if reranked is not None:
+        return {"mode": "hybrid+rerank", "model": EMBED_MODEL, "reranker": RERANK_MODEL,
+                "version": snap["version"], "hits": reranked}
+    return {"mode": "hybrid", "model": EMBED_MODEL, "version": snap["version"], "hits": hits[:k]}
 
 
 # ---------------------------------------------------------------- uploads + dynamic index for the VR app
@@ -266,7 +336,9 @@ def status():
             "stt": bool(p and p["name"] == "groq"),
             "search": "hybrid" if EMB["state"] == "ready" else ("keyword (embeddings " + EMB["state"] + ")"),
             "docs": len(STORE.snapshot["index"]["docs"]), "indexVersion": STORE.snapshot["version"],
-            "embedModel": EMBED_MODEL, "backend": "python"}
+            "embedModel": EMBED_MODEL, "vectorStore": "qdrant" if STORE.snapshot.get("qdrant") is not None else "numpy",
+            "backend": "python", "tts": True, "stream": True,
+            "reranker": RERANK_MODEL}
 
 
 @app.get("/api/grok/models")
@@ -315,6 +387,75 @@ async def stt(req: Request):
     return r.json()
 
 
+# ---------------------------------------------------------------- streaming answers (SSE) + text-to-speech
+@app.post("/api/grok/stream")
+async def grok_stream(req: Request):
+    """Server-Sent Events: relays the model's tokens as `data: {"token": "..."}` lines, ends with `data: [DONE]`."""
+    p = provider()
+    if not p:
+        return JSONResponse({"error": "No API key. Put a Groq (gsk_...) or xAI (xai-...) key in grok_api_key.txt"}, 400)
+    body = await req.json()
+    model = chat_model()
+    payload = {"model": model, "messages": body.get("messages", []), "temperature": 0.2, "max_tokens": 600,
+               "stream": True}
+    if "gpt-oss" in model:
+        payload["reasoning_effort"] = "low"
+
+    def gen():
+        try:
+            with requests.post(f"{p['base']}/chat/completions", json=payload, stream=True, timeout=90,
+                               headers={"Authorization": f"Bearer {get_key()}"}) as r:
+                if r.status_code != 200:
+                    msg = f"{p['name']} API: HTTP {r.status_code} - {r.text[:300]}"
+                    yield "data: " + json.dumps({"error": msg}) + "\n\n"
+                    return
+                r.encoding = "utf-8"
+                for line in r.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        tok = json.loads(chunk)["choices"][0]["delta"].get("content")
+                    except (ValueError, KeyError, IndexError):
+                        continue
+                    if tok:
+                        yield "data: " + json.dumps({"token": tok}) + "\n\n"
+        except Exception as e:
+            yield "data: " + json.dumps({"error": f"{p['name']} API: {e}"}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "en-US-ChristopherNeural"
+
+
+@app.post("/api/tts")
+async def text_to_speech(body: TTSRequest):
+    """Neural text-to-speech (Microsoft Edge voices via edge-tts). Returns MP3. Needs internet access."""
+    text = re.sub(r"\s+", " ", body.text).strip()[:1500]
+    if not text:
+        return JSONResponse({"error": "Empty text"}, 400)
+    if not re.fullmatch(r"[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z]+Neural", body.voice):
+        return JSONResponse({"error": "Invalid voice name"}, 400)
+    try:
+        import edge_tts
+        audio = bytearray()
+        async for chunk in edge_tts.Communicate(text, body.voice).stream():
+            if chunk["type"] == "audio":
+                audio += chunk["data"]
+    except Exception as e:
+        return JSONResponse({"error": f"TTS synthesis failed: {e}"}, 502)
+    if not audio:
+        return JSONResponse({"error": "TTS returned no audio"}, 502)
+    return Response(bytes(audio), media_type="audio/mpeg", headers=NO_CACHE)
+
+
 # ---------------------------------------------------------------- ProcOps (question log, heatmap, AI redline, versions)
 def llm_complete(messages, max_tokens=1200):
     """Server-side chat call used by ProcOps. Returns the reply text or raises."""
@@ -347,7 +488,10 @@ except Exception as _e:
 
 
 @app.post("/api/server/stop")
-def stop():
+def stop(request: Request):
+    host = request.client.host if request.client else ""
+    if host not in ("127.0.0.1", "::1", "localhost") or request.headers.get("x-forwarded-for"):
+        return JSONResponse({"error": "Stopping the server is only allowed from the machine it runs on"}, 403)
     threading.Timer(0.5, lambda: os._exit(0)).start()
     return {"stopping": True}
 

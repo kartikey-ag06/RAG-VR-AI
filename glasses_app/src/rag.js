@@ -145,14 +145,14 @@ const SMART_SYSTEM =
   "4. Never invent citations, section numbers, case numbers or penalty amounts. If unsure, say so.";
 
 /** returns { text, mode: "pdf" | "general" | "offline", cited: [hit indexes] } */
-export async function answerSmart(question, hits, cfg) {
+export async function answerSmart(question, hits, cfg, onPartial) {
   if (cfg.provider === "none") {
     if (!hits.length) return { text: "No matching text in the 10 SEBI orders, and no AI is connected for general questions.", mode: "offline", cited: [] };
     return { text: extractive(question, hits), mode: "offline", cited: hits.map((_, i) => i) };
   }
   const user = (hits.length ? buildPrompt(question, hits) : "Excerpts: (none matched)\n\nQuestion: " + question);
   let raw;
-  try { raw = await callLlm(SMART_SYSTEM, user, cfg); }
+  try { raw = await callLlm(SMART_SYSTEM, user, cfg, onPartial ? (t) => onPartial(partialAnswerText(t)) : null); }
   catch (e) {
     return { text: `AI error (${cfg.provider}): ${e.message}\n\n` + (hits.length ? extractive(question, hits) : ""), mode: "offline", cited: hits.map((_, i) => i) };
   }
@@ -173,8 +173,45 @@ function parseSmart(raw, hits) {
   return { text: body, mode, cited };
 }
 
-async function callLlm(system, user, cfg) {
+/** Reads Server-Sent Events from /api/grok/stream and calls onToken(textSoFar) as tokens arrive.
+ *  Resolves with the full text. Throws if the stream is unavailable or reports an error. */
+async function streamLlm(system, user, onToken) {
+  const r = await fetch(apiUrl("/api/grok/stream"), { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
+  if (!r.ok || !r.body) { const e = new Error("stream unavailable (HTTP " + r.status + ")"); e.noStream = true; throw e; }
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "", full = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n\n")) >= 0) {
+      const ev = buf.slice(0, nl).trim(); buf = buf.slice(nl + 2);
+      if (!ev.startsWith("data:")) continue;
+      const d = ev.slice(5).trim();
+      if (d === "[DONE]") return full;
+      let j; try { j = JSON.parse(d); } catch { continue; }
+      if (j.error) throw new Error(j.error);
+      if (j.token) { full += j.token; if (onToken) onToken(full); }
+    }
+  }
+  return full;
+}
+
+/** Text of a (possibly unfinished) smart answer without the leading "SOURCE: ..." line, as plain text. */
+export function partialAnswerText(raw) {
+  const m = raw.match(/^\s*SOURCE:[^\n]*\n?/i);
+  if (!m && /^\s*S(O(U(R(C(E:?)?)?)?)?)?$/i.test(raw)) return "";     // first line still being typed
+  return (m ? raw.slice(m[0].length) : raw).replace(/\*\*(.+?)\*\*/g, "$1").replace(/^#+\s*/gm, "").trimStart();
+}
+
+async function callLlm(system, user, cfg, onToken) {
   let r, j;
+  if ((cfg.provider === "grok" || cfg.provider === "groq") && onToken) {
+    try { return await streamLlm(system, user, onToken); }
+    catch (e) { if (!e.noStream) throw e; /* old backend without /api/grok/stream: use the normal call below */ }
+  }
   if (cfg.provider === "grok" || cfg.provider === "groq") {
     r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });

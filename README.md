@@ -38,6 +38,10 @@
   - The two rankings are merged with **Reciprocal Rank Fusion** (RRF): score = 1/(60 + rank_semantic) + 0.8/(60 + rank_keyword).
 - Chunk embeddings are computed once and cached in `backend/cache/`. The cache is rebuilt automatically when `index.json` changes.
 - The API stays the same (`/api/grok`, `/api/stt`, `/api/grok/status`) plus a new **`/api/search`**. If the Python backend is not running, the app falls back to TF-IDF in the browser.
+- **Vector store: Qdrant** (embedded mode, no server needed, persistent in `backend/data/qdrant/`, cosine). It is created automatically on first start. On later starts existing vectors are reused: only new or changed chunks are embedded, and chunks of deleted documents are removed (no duplicates). Delete the `qdrant` folder to rebuild it. Only one process can open the folder at a time. If Qdrant can't load, the old `.npy` cache is used.
+- After the hybrid search, a **FlashRank cross-encoder** (`ms-marco-TinyBERT-L-2-v2`, ONNX/CPU, downloaded once) re-scores the top 20 and keeps the best 8 (`mode: hybrid+rerank`). If it cannot load, plain RRF order is used.
+- PDF text comes from `pymupdf4llm` (markdown with tables). Tables are never split mid-row. If PyMuPDF cannot load (Windows Application Control), `pypdfium2` is used (plain text).
+- Streaming answers: `POST /api/grok/stream` (SSE). Spoken answers: `POST /api/tts` (needs internet).
 - No Python? Use `START_VR_RAG_POWERSHELL.bat`, the old server with keyword search only.
 
 ## Upload documents (no more copying files into docs/)

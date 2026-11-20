@@ -43,7 +43,8 @@ def tokenize(text):
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) > 1 and t not in STOP]
 
 
-def chunk_page(text):
+def _window_words(text):
+    """Old fixed-size chunking: ~120-word windows with 30 words overlap (used for long plain paragraphs)."""
     words, out = text.split(), []
     step = CHUNK_WORDS - OVERLAP
     for start in range(0, max(len(words), 1), step):
@@ -54,6 +55,60 @@ def chunk_page(text):
         if len(tokenize(t)) >= 5:
             out.append(t)
     return out
+
+
+def _is_table_line(line):
+    return line.lstrip().startswith("|")
+
+
+def chunk_page(text):
+    """Layout-aware chunking. Paragraphs are kept whole and packed into chunks of up to ~CHUNK_WORDS words.
+    A markdown table (lines starting with '|') is never cut in the middle of a row: a big table is split
+    between rows, and every part repeats the table header, so a penalty amount stays next to its label."""
+    if not any(_is_table_line(l) for l in text.splitlines()) and "\n\n" not in text.strip():
+        return _window_words(text)                       # plain text without structure (DOCX/TXT pages, old data)
+    blocks, cur, in_table = [], [], False
+    for line in text.splitlines():                       # split into paragraph / table blocks
+        tbl = _is_table_line(line)
+        if (not line.strip()) or tbl != in_table:
+            if cur:
+                blocks.append((in_table, cur))
+            cur = []
+        if line.strip():
+            cur.append(line)
+        in_table = tbl
+    if cur:
+        blocks.append((in_table, cur))
+    pieces = []                                          # (text, is_table) units no bigger than ~CHUNK_WORDS*1.5
+    for is_tbl, lines in blocks:
+        if is_tbl:
+            head, rows, part = lines[:2], lines[2:], []
+            if len(lines) < 3 or not set(lines[1].replace("|", "").strip()) <= set("-: "):
+                head, rows = [], lines                   # no header separator row
+            n = sum(len(l.split()) for l in head)
+            for r in rows or [""]:
+                w = len(r.split())
+                if part and n + w > CHUNK_WORDS * 1.5:
+                    pieces.append(("\n".join(head + part), True)); part, n = [], sum(len(l.split()) for l in head)
+                part.append(r); n += w
+            pieces.append(("\n".join(head + part), True))
+        else:
+            para = " ".join(lines)
+            if len(para.split()) > CHUNK_WORDS * 1.5:
+                pieces.extend((w, False) for w in _window_words(para))
+            else:
+                pieces.append((para, False))
+    out, cur_t, n = [], [], 0
+    for t, is_tbl in pieces:
+        w = len(t.split())
+        if cur_t and (n + w > CHUNK_WORDS or is_tbl):
+            out.append("\n".join(cur_t)); cur_t, n = [], 0
+        cur_t.append(t); n += w
+        if is_tbl:
+            out.append("\n".join(cur_t)); cur_t, n = [], 0
+    if cur_t:
+        out.append("\n".join(cur_t))
+    return [c for c in out if len(tokenize(c)) >= 5]
 
 
 def pretty_title(name):
@@ -142,11 +197,29 @@ def extract(path, ext, page_dir, title):
     """Returns the list of page texts and writes pNNN.jpg for every page."""
     page_dir.mkdir(parents=True, exist_ok=True)
     if ext == ".pdf":
-        import pymupdf
+        try:
+            import pymupdf
+        except ImportError as ex:        # e.g. Windows Application Control blocks PyMuPDF's DLL
+            print(f"[index] PyMuPDF unavailable ({str(ex)[:80]}), using pypdfium2 (plain text, no tables)", flush=True)
+            return _extract_pdf_pdfium(path, page_dir)
         texts = []
         with pymupdf.open(path) as doc:
+            md_ok = True
+            try:
+                import pymupdf4llm                       # layout + table aware text (markdown tables)
+            except Exception:
+                md_ok = False
             for i, page in enumerate(doc):
-                texts.append(page.get_text())
+                txt = None
+                if md_ok:
+                    try:
+                        txt = pymupdf4llm.to_markdown(doc, pages=[i], show_progress=False, use_ocr=False) \
+                            if _md_accepts_ocr() else pymupdf4llm.to_markdown(doc, pages=[i], show_progress=False)
+                    except Exception as ex:
+                        print(f"[index] markdown extraction failed on page {i + 1}, using plain text: {ex}", flush=True)
+                if not txt or not txt.strip():
+                    txt = page.get_text()
+                texts.append(txt)
                 zoom = IMG_W / page.rect.width
                 page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(str(page_dir / f"p{i + 1:03d}.jpg"), jpg_quality=70)
         return texts
@@ -165,6 +238,36 @@ def extract(path, ext, page_dir, title):
     for i, t in enumerate(pages):
         render_text_page(t, title, i + 1, len(pages), page_dir / f"p{i + 1:03d}.jpg")
     return pages
+
+
+def _extract_pdf_pdfium(path, page_dir):
+    """Fallback PDF reader (pypdfium2) for machines where PyMuPDF cannot load. Plain text, no table layout."""
+    import pypdfium2 as pdfium
+    texts = []
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        for i in range(len(pdf)):
+            page = pdf[i]
+            tp = page.get_textpage()
+            texts.append(tp.get_text_range().replace("\r\n", "\n"))
+            tp.close()
+            scale = IMG_W / page.get_width()
+            page.render(scale=scale).to_pil().convert("RGB").save(page_dir / f"p{i + 1:03d}.jpg", "JPEG", quality=70)
+            page.close()
+    finally:
+        pdf.close()
+    return texts
+
+
+_MD_OCR = {}
+
+
+def _md_accepts_ocr():
+    if "v" not in _MD_OCR:
+        import inspect
+        import pymupdf4llm
+        _MD_OCR["v"] = "use_ocr" in inspect.signature(pymupdf4llm.to_markdown).parameters
+    return _MD_OCR["v"]
 
 
 def _decodes(raw, enc):
@@ -194,6 +297,7 @@ class Store:
         self.lock = threading.RLock()
         self.queue = []
         self.wake = threading.Event()
+        self.qdrant = None              # embedded QdrantClient, created lazily by _sync_qdrant
         self.embedder = None            # set by app.py once the embedding model is loaded
         self.model_name = ""
         self.snapshot = {"version": 0, "index": {"docs": [], "vocab": [], "idf": [], "chunks": []},
@@ -421,12 +525,62 @@ class Store:
             c["weights"] = [round(v / norm, 4) for _, v in items]
         version = int(time.time() * 1000)
         index = {"version": version, "docs": index_docs, "vocab": vocab, "idf": idf, "chunks": chunks}
-        matrix = self._embeddings(docs, chunks, chunk_doc_uid)
+        ids, col, cname = self._sync_qdrant(docs, chunks, chunk_doc_uid)   # Qdrant vector store (created on first run)
+        matrix = None if col is not None else self._embeddings(docs, chunks, chunk_doc_uid)   # .npy fallback
         (self.root / "index.json").write_text(json.dumps(index, ensure_ascii=False), "utf-8")
         with self.lock:
             self.snapshot = {"version": version, "index": index, "vocab": vidx, "matrix": matrix,
-                             "uids": [d["uid"] for d in docs]}
-        print(f"[index] ready: {len(docs)} docs, {n} chunks, embeddings {'yes' if matrix is not None else 'no'}", flush=True)
+                             "uids": [d["uid"] for d in docs], "ids": ids, "idpos": {i: j for j, i in enumerate(ids or [])}, "qdrant": col, "qname": cname}
+        print(f"[index] ready: {len(docs)} docs, {n} chunks, embeddings "
+              f"{'qdrant' if col is not None else ('npy' if matrix is not None else 'no')}", flush=True)
+
+    def _sync_qdrant(self, docs, chunks, chunk_doc_uid):
+        """Keeps the persistent Qdrant collection (embedded mode, data/qdrant) in step with the current chunks.
+        First run: the store + collection are created and everything is embedded. Later runs: chunks that are
+        already stored are skipped (point ids are deterministic: uuid5 of uid + position + text hash, so nothing is
+        duplicated), only new/changed chunks are embedded, and chunks of deleted/revised documents are removed.
+        Returns (ids aligned with chunks, client, collection name) or (None, None, None) when unavailable."""
+        if self.embedder is None or not chunks:
+            return None, None, None
+        try:
+            from qdrant_client import QdrantClient, models
+            name = "chunks_" + re.sub(r"[^A-Za-z0-9]+", "_", self.model_name).strip("_")[:80]
+            if self.qdrant is None:
+                self.qdrant = QdrantClient(path=str(self.root / "qdrant"))
+                existed = self.qdrant.collection_exists(name)
+                if not existed:
+                    dim = len(next(iter(self.embedder.passage_embed(["dimension probe"]))))
+                    self.qdrant.create_collection(name, vectors_config=models.VectorParams(
+                        size=dim, distance=models.Distance.COSINE))
+                print(f"[qdrant] {'using existing' if existed else 'created new'} collection '{name}' "
+                      f"({self.qdrant.count(name).count} vectors) in {self.root / 'qdrant'}", flush=True)
+            q = self.qdrant
+            pos, ids = {}, []
+            for c, u in zip(chunks, chunk_doc_uid):
+                k = pos[u] = pos.get(u, -1) + 1
+                ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{u}:{k}:{hashlib.sha1(c['text'].encode('utf-8')).hexdigest()}")))
+            have, offset = set(), None
+            while True:
+                pts, offset = q.scroll(name, limit=2000, offset=offset, with_payload=False, with_vectors=False)
+                have.update(str(p.id) for p in pts)
+                if offset is None:
+                    break
+            want = set(ids)
+            stale = list(have - want)
+            for i in range(0, len(stale), 2000):
+                q.delete(name, points_selector=models.PointIdsList(points=stale[i:i + 2000]))
+            todo = [(i, c) for i, c in zip(ids, chunks) if i not in have]
+            for b in range(0, len(todo), 64):
+                part = todo[b:b + 64]
+                vecs = np.array(list(self.embedder.passage_embed([c["text"] for _, c in part], batch_size=32)), dtype=np.float32)
+                vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+                q.upsert(name, points=[models.PointStruct(id=i, vector=v.tolist(), payload={"doc": c["doc"], "page": c["page"]})
+                                       for (i, c), v in zip(part, vecs)])
+            print(f"[qdrant] {len(want) - len(todo)} reused, {len(todo)} added, {len(stale)} removed", flush=True)
+            return ids, q, name
+        except Exception as ex:
+            print(f"[qdrant] unavailable, using .npy embedding cache instead: {ex}", flush=True)
+            return None, None, None
 
     def _embeddings(self, docs, chunks, chunk_doc_uid):
         """Per-document embedding cache: only new documents are embedded."""

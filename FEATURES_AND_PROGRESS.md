@@ -52,6 +52,12 @@ A voice-first Augmented Reality (AR/VR) Retrieval-Augmented Generation (RAG) ass
 - **Companion Viewports:** Mirror web applications into VR floating windows (Chrome, WhatsApp, Instagram, Gmail, YouTube, ProcOps, Upload).
 - **Window Controls:** Depth sorting, bring-to-front, and quick dismiss from the drawer.
 
+### 🔊 Streaming & Spoken Answers (added)
+- **SSE token streaming:** `POST /api/grok/stream`; the answer panel fills token by token.
+- **Voice out:** `POST /api/tts` (edge-tts neural voice), sentence queue in `glasses_app/src/tts-player.js`, browser `speechSynthesis` fallback, barge-in when you start talking. 🔊 button toggles it.
+- **Table-aware chunking** (`pymupdf4llm` markdown; tables are never cut mid-row) and **FlashRank cross-encoder reranking** (top 20 -> top 8).
+- **Page image LRU cache** (6 pages) in the VR panel; `/api/server/stop` is local-only; `.env` support.
+
 ---
 
 ## 2. Progress Till Now
@@ -64,6 +70,10 @@ A voice-first Augmented Reality (AR/VR) Retrieval-Augmented Generation (RAG) ass
 | **Phase 4: Document Upload & Ingestion** | ✅ Completed | Web portal (`/upload`), automatic PDF/DOCX/TXT conversion, visual page generator, hot-reload index versioning. |
 | **Phase 5: Vision & AR Simulation** | ✅ Completed | Passthrough AR environment, webcam scanning, in-VR reticle capture (X-key scan), Groq Vision multimodal answers. |
 | **Phase 6: ProcOps & App Multitasking** | ✅ Completed | Friction heatmap dashboard, AI revision editor, in-VR floating app window mirrors. |
+
+---
+
+| **Phase 7: Voice loop, rerank, hardening** | ✅ Done (see above) | Not done yet from ARCHITECTURE_RECOMMENDATIONS.md: SQLite migration (vectors now live in embedded Qdrant), JWT auth, Ragas evals, tag-along panels. |
 
 ---
 
