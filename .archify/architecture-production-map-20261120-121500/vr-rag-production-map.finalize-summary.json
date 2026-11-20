@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\candidate.json",
+    "sha256": "b7544249935f11d3c3f1f2f8cfe446f3ccfc01227bb9a5eabbe4990ac609e9a3",
+    "bytes": 7208
+  },
+  "artifact": {
+    "path": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\vr-rag-production-map.html",
+    "sha256": "ecefc8d3ad3f06cfe642f7b398fbccc3cc7daebf29f4750791859e8aaa71a736",
+    "bytes": 867679
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\vr-rag-production-map.finalize.json",
+    "summaryReceipt": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\vr-rag-production-map.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\vr-rag-production-map.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-20T06:27:19.275Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4855,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

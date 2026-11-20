@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "VR_RAG Production Architecture Map",
+    "subtitle": "Voice-First Spatial WebXR Assistant with Streaming Hybrid RAG",
+    "output": ".archify/architecture-production-map-20261120-121500/vr-rag-production-map.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "ptt_mic", "type": "frontend", "icon": "active", "label": "PTT Microphone", "sublabel": "MediaRecorder WebM", "pos": [50, 90], "size": [130, 60] },
+    { "id": "user_xr", "type": "external", "icon": "person", "label": "VR Glasses User", "sublabel": "Meta Quest / Glasses", "pos": [50, 230], "size": [130, 60] },
+    { "id": "voice_player", "type": "frontend", "icon": "active", "label": "VR Voice Player", "sublabel": "Spatial Audio Queue", "pos": [50, 370], "size": [130, 60] },
+
+    { "id": "audio_streamer", "type": "frontend", "icon": "active", "label": "Audio Uploader", "sublabel": "Chunked Audio Stream", "pos": [290, 90], "size": [130, 60] },
+    { "id": "webxr_client", "type": "frontend", "icon": "frontend", "label": "Glasses WebXR App", "sublabel": "IWSDK 1.1 + Three.js", "pos": [290, 230], "size": [130, 60] },
+    { "id": "texture_pool", "type": "frontend", "icon": "database", "label": "LRU Texture Pool", "sublabel": "VRAM Cache Cap (6)", "pos": [290, 370], "size": [130, 60] },
+
+    { "id": "stt_proxy", "type": "backend", "icon": "backend", "label": "STT Whisper Proxy", "sublabel": "POST /api/stt", "pos": [530, 90], "size": [130, 60] },
+    { "id": "api_gateway", "type": "backend", "icon": "security", "label": "FastAPI Gateway", "sublabel": "Auth & SSE Stream", "pos": [530, 230], "size": [130, 60] },
+    { "id": "tts_engine", "type": "backend", "icon": "active", "label": "edge-tts Engine", "sublabel": "Neural MP3 Stream", "pos": [530, 370], "size": [130, 60] },
+
+    { "id": "reranker", "type": "backend", "icon": "active", "label": "FlashRank Reranker", "sublabel": "Cross-Encoder Top-4", "pos": [770, 90], "size": [130, 60] },
+    { "id": "hybrid_retriever", "type": "backend", "icon": "backend", "label": "Hybrid RRF Engine", "sublabel": "Dense + Sparse Fusion", "pos": [770, 230], "size": [130, 60] },
+    { "id": "doc_store", "type": "database", "icon": "database", "label": "Document Store", "sublabel": "150 DPI Page JPEGs", "pos": [770, 370], "size": [130, 60] },
+
+    { "id": "llm_router", "type": "backend", "icon": "backend", "label": "LLM Router", "sublabel": "Multi-Provider Proxy", "pos": [1010, 90], "size": [130, 60] },
+    { "id": "qdrant_db", "type": "database", "icon": "database", "label": "Qdrant Vector DB", "sublabel": "HNSW Dense Index", "pos": [1010, 230], "size": [130, 60] },
+    { "id": "sparse_index", "type": "database", "icon": "database", "label": "TF-IDF Store", "sublabel": "Inverted Index", "pos": [1010, 370], "size": [130, 60] },
+
+    { "id": "cloud_llms", "type": "cloud", "icon": "cloud", "label": "Cloud LLM APIs", "sublabel": "Groq / Claude / xAI", "pos": [1250, 90], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Spatial WebXR Runtime", "wraps": ["user_xr", "ptt_mic", "voice_player", "audio_streamer", "webxr_client", "texture_pool"] },
+    { "kind": "region", "label": "FastAPI Real-Time Gateway", "wraps": ["stt_proxy", "api_gateway", "tts_engine"] },
+    { "kind": "region", "label": "Advanced RAG Pipeline & Storage", "wraps": ["reranker", "hybrid_retriever", "doc_store", "llm_router", "qdrant_db", "sparse_index"] },
+    { "kind": "region", "label": "External Cloud Inference", "wraps": ["cloud_llms"] }
+  ],
+  "connections": [
+    { "id": "user-ptt", "from": "user_xr", "to": "ptt_mic", "label": "PTT Speak", "fromSide": "top", "toSide": "bottom" },
+    { "id": "user-touch", "from": "user_xr", "to": "webxr_client", "label": "XR Ray", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "player-user", "from": "voice_player", "to": "user_xr", "label": "Spatial Audio", "fromSide": "top", "toSide": "bottom" },
+
+    { "id": "mic-streamer", "from": "ptt_mic", "to": "audio_streamer", "label": "Audio Blob", "fromSide": "right", "toSide": "left" },
+    { "id": "streamer-stt", "from": "audio_streamer", "to": "stt_proxy", "label": "POST Audio", "fromSide": "right", "toSide": "left" },
+    { "id": "stt-gateway", "from": "stt_proxy", "to": "api_gateway", "label": "Transcribed Text", "fromSide": "bottom", "toSide": "top" },
+
+    { "id": "client-gateway", "from": "webxr_client", "to": "api_gateway", "label": "REST Query", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "gateway-hybrid", "from": "api_gateway", "to": "hybrid_retriever", "label": "Hybrid Search", "fromSide": "right", "toSide": "left" },
+    { "id": "gateway-tts", "from": "api_gateway", "to": "tts_engine", "label": "Sentence Stream", "fromSide": "bottom", "toSide": "top" },
+
+    { "id": "hybrid-qdrant", "from": "hybrid_retriever", "to": "qdrant_db", "label": "Dense Query", "fromSide": "right", "toSide": "left" },
+    { "id": "hybrid-sparse", "from": "hybrid_retriever", "to": "sparse_index", "label": "TF-IDF Query", "fromSide": "right", "toSide": "left" },
+    { "id": "hybrid-docs", "from": "hybrid_retriever", "to": "doc_store", "label": "Page Textures", "fromSide": "bottom", "toSide": "top" },
+    { "id": "hybrid-reranker", "from": "hybrid_retriever", "to": "reranker", "label": "Top Candidates", "fromSide": "top", "toSide": "bottom" },
+
+    { "id": "reranker-router", "from": "reranker", "to": "llm_router", "label": "Top-4 Context", "fromSide": "right", "toSide": "left" },
+    { "id": "router-cloud", "from": "llm_router", "to": "cloud_llms", "label": "Inference API", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+
+    { "id": "tts-client", "from": "tts_engine", "to": "webxr_client", "label": "Audio Response", "fromSide": "left", "toSide": "right" },
+    { "id": "client-player", "from": "webxr_client", "to": "voice_player", "label": "Enqueue Speech", "fromSide": "left", "toSide": "right" },
+    { "id": "pool-client", "from": "texture_pool", "to": "webxr_client", "label": "VRAM Cache", "fromSide": "top", "toSide": "bottom" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Spatial WebXR Tier", "items": ["Push-to-talk voice capture & Three.js spatial audio", "Real-time token streaming directly into 3D UIKitML panels", "LRU GPU texture pool preventing mobile headset VRAM overflow"] },
+    { "dot": "emerald", "title": "Advanced RAG Pipeline", "items": ["PyMuPDF4LLM layout & table-preserving markdown extraction", "Hybrid search combining dense vectors with sparse TF-IDF via RRF", "FlashRank cross-encoder reranking the top-20 candidates to top-4"] },
+    { "dot": "violet", "title": "Full Voice Loop", "items": ["Groq Whisper STT transcribing audio in ~200ms", "Sentence-level buffering triggering edge-tts neural audio", "Barge-in interruption cutting playback immediately when speaking"] },
+    { "dot": "rose", "title": "Enterprise Reliability", "items": ["Stateless FastAPI gateway with Bearer authentication", "Persistent Qdrant vector database and SQLite/PostgreSQL ProcOps log", "Decoupled asynchronous worker queue for multi-page document ingestion"] }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "d8a3efdc-0502-4dcd-9f11-c70866fe4030",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\candidate.json",
+  "output": "C:\\Users\\Hemant Kumar\\Desktop\\k_RAG\\.archify\\architecture-production-map-20261120-121500\\vr-rag-production-map.html",
+  "specification": {
+    "sha256": "b7544249935f11d3c3f1f2f8cfe446f3ccfc01227bb9a5eabbe4990ac609e9a3",
+    "bytes": 7208
+  },
+  "artifact": {
+    "sha256": "ecefc8d3ad3f06cfe642f7b398fbccc3cc7daebf29f4750791859e8aaa71a736",
+    "bytes": 867679
+  }
+}

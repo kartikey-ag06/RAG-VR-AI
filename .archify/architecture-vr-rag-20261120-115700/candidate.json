@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "VR_RAG System Architecture",
+    "subtitle": "Voice-First Spatial AR/VR Multimodal Retrieval-Augmented Generation",
+    "output": ".archify/architecture-vr-rag-20261120-115700/vr-rag-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "user_xr", "type": "external", "label": "VR Glasses User", "sublabel": "Meta Quest / WebXR", "pos": [50, 240], "size": [140, 60] },
+    { "id": "voice_in", "type": "frontend", "label": "PTT Voice Capture", "sublabel": "MediaRecorder Audio", "pos": [50, 100], "size": [140, 60] },
+    { "id": "mirror_tabs", "type": "frontend", "label": "App Mirroring", "sublabel": "getDisplayMedia Video", "pos": [50, 380], "size": [140, 60] },
+    { "id": "webxr_client", "type": "frontend", "label": "Glasses WebXR App", "sublabel": "IWSDK 1.1 + Three.js", "pos": [250, 240], "size": [150, 70] },
+    { "id": "fastapi_gateway", "type": "backend", "label": "FastAPI Gateway", "sublabel": "Uvicorn HTTP :8765", "pos": [500, 240], "size": [150, 70] },
+    { "id": "procops_engine", "type": "backend", "label": "ProcOps Engine", "sublabel": "Heatmap & Redline Drafts", "pos": [500, 390], "size": [150, 60] },
+    { "id": "llm_router", "type": "backend", "label": "LLM Router Proxy", "sublabel": "Groq / Grok / Claude / Ollama", "pos": [760, 100], "size": [150, 60] },
+    { "id": "hybrid_search", "type": "backend", "label": "Hybrid Search Engine", "sublabel": "RRF Score Fusion", "pos": [760, 240], "size": [150, 70] },
+    { "id": "doc_storage", "type": "database", "label": "PDF & Page Store", "sublabel": "150 DPI Rendered JPEGs", "pos": [760, 390], "size": [150, 60] },
+    { "id": "vector_store", "type": "database", "label": "Dense Vectors", "sublabel": "bge-small-en-v1.5", "pos": [980, 200], "size": [150, 60] },
+    { "id": "tfidf_store", "type": "database", "label": "Sparse Index", "sublabel": "TF-IDF Inverted Index", "pos": [980, 280], "size": [150, 60] },
+    { "id": "cloud_llms", "type": "cloud", "label": "Cloud LLM APIs", "sublabel": "Groq / xAI / Anthropic", "pos": [1200, 100], "size": [150, 60] },
+    { "id": "stt_service", "type": "cloud", "label": "Groq Whisper STT", "sublabel": "whisper-large-v3-turbo", "pos": [1200, 240], "size": [150, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Meta Glasses / WebXR Client", "wraps": ["user_xr", "voice_in", "mirror_tabs", "webxr_client"] },
+    { "kind": "region", "label": "Backend Services & Storage", "wraps": ["fastapi_gateway", "procops_engine", "hybrid_search", "llm_router", "doc_storage", "vector_store", "tfidf_store"] },
+    { "kind": "region", "label": "External Cloud AI Providers", "wraps": ["cloud_llms", "stt_service"] }
+  ],
+  "connections": [
+    { "id": "user-voice", "from": "user_xr", "to": "voice_in", "label": "PTT Speak", "fromSide": "top", "toSide": "bottom" },
+    { "id": "voice-client", "from": "voice_in", "to": "webxr_client", "label": "Audio Blob", "fromSide": "right", "toSide": "top" },
+    { "id": "user-interact", "from": "user_xr", "to": "webxr_client", "label": "XR Ray", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "mirror-client", "from": "mirror_tabs", "to": "webxr_client", "label": "Video Texture", "fromSide": "right", "toSide": "bottom" },
+    { "id": "client-gateway", "from": "webxr_client", "to": "fastapi_gateway", "label": "REST API", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "gateway-hybrid", "from": "fastapi_gateway", "to": "hybrid_search", "label": "Hybrid Query", "fromSide": "right", "toSide": "left" },
+    { "id": "gateway-router", "from": "fastapi_gateway", "to": "llm_router", "label": "Proxy LLM", "fromSide": "top", "toSide": "left" },
+    { "id": "gateway-procops", "from": "fastapi_gateway", "to": "procops_engine", "label": "Interaction Log", "fromSide": "bottom", "toSide": "top" },
+    { "id": "gateway-stt", "from": "fastapi_gateway", "to": "stt_service", "label": "Transcribe", "fromSide": "top", "toSide": "left" },
+    { "id": "hybrid-vector", "from": "hybrid_search", "to": "vector_store", "label": "Dense Match", "fromSide": "right", "toSide": "left" },
+    { "id": "hybrid-tfidf", "from": "hybrid_search", "to": "tfidf_store", "label": "Sparse Match", "fromSide": "right", "toSide": "left" },
+    { "id": "hybrid-pages", "from": "hybrid_search", "to": "doc_storage", "label": "Citations", "fromSide": "bottom", "toSide": "top" },
+    { "id": "router-cloud", "from": "llm_router", "to": "cloud_llms", "label": "Chat API", "fromSide": "right", "toSide": "left", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Spatial Client", "items": ["Meta IWSDK 1.1 + Three.js rendering", "Push-to-talk voice capture & tab mirroring", "Floating 3D UIKitML answer panels and page textures"] },
+    { "dot": "emerald", "title": "Hybrid RAG Pipeline", "items": ["Lexical TF-IDF + BAAI/bge-small-en-v1.5 dense vectors", "Reciprocal Rank Fusion (RRF) combines sparse and dense rankings", "Direct citation mapping to 150 DPI PDF page scans"] },
+    { "dot": "rose", "title": "Orchestration & Operations", "items": ["Unified proxy for Groq, Grok, Claude, and Ollama", "ProcOps feedback loop with friction heatmaps and AI redlines", "Zero-install PowerShell server fallback for rapid testing"] }
+  ]
+}
