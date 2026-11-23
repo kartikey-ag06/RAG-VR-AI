@@ -183,7 +183,8 @@ function render() {
   $('history').innerHTML = hist.length ? `<table><tr><th>Version</th><th>Document · page</th><th>Change</th><th>Questions before → after</th></tr>` +
     hist.map((h) => `<tr><td><span class="ver rev">v${esc(h.version)}</span><div class="muted small">${esc(when(h.approved))}</div></td>
       <td>${esc(h.title)} · <a href="#" data-uid="${h.uid}" data-page="${h.page}" style="color:var(--accent)">p.${h.page}</a></td>
-      <td>${esc(h.summary)}<div class="muted small">approved by ${esc(h.approver || 'unknown')}</div></td>
+      <td>${esc(h.summary)}<div class="muted small">approved by ${esc(h.approver || 'unknown')}</div>
+        ${h.base_doc_sha256 ? `<div class="muted small" title="Audit stamp">🔏 ${esc(h.agent || 'vr-rag-procops')} · ${esc(h.classification || 'internal')} · base v${esc(h.base_version || '1.0')}<br>doc sha256 <code>${esc(h.base_doc_sha256.slice(0, 16))}…</code> · page sha256 <code>${esc((h.base_page_sha256 || '').slice(0, 16))}…</code> → <code>${esc((h.revised_page_sha256 || '').slice(0, 16))}…</code></div>` : ''}</td>
       <td><span class="${h.after < h.evidence ? 'down' : ''}">${h.evidence} → ${h.after}</span></td></tr>`).join('') + '</table>'
     : '<div class="empty">No revisions approved yet.</div>';
 

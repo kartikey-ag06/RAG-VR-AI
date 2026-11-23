@@ -66,6 +66,12 @@ def _load_dotenv():
 
 
 _load_dotenv()
+MIN_RERANK_CONFIDENCE = float(os.environ.get("VR_RAG_MIN_CONFIDENCE", "0.20"))   # below this the question is treated as not covered by the documents
+# The cross-encoder alone is noisy for short keyword queries ("insider trading" scores 0.14 although the orders cover it),
+# so a question is only rejected when the embedding similarity is also low. Measured: off-topic questions reach <= 0.65,
+# short on-topic queries >= 0.665. The margin is small, so the gate leans lenient: the LLM still answers "GENERAL" itself
+# when the excerpts do not help, whereas a wrongly rejected question would lose its citations.
+MIN_SEMANTIC_SIM = float(os.environ.get("VR_RAG_MIN_SEMANTIC", "0.65"))
 RERANK_CANDIDATES = 20   # hybrid search keeps this many, the cross-encoder reranker cuts them to k
 RERANK_MODEL = os.environ.get("VR_RAG_RERANK_MODEL", "ms-marco-TinyBERT-L-2-v2")
 
@@ -160,7 +166,8 @@ def rerank(query, hits, chunks, k):
         return None
     try:
         from flashrank import RerankRequest
-        passages = [{"id": j, "text": chunks[h["i"]]["text"]} for j, h in enumerate(hits)]
+        dtitles = [d["title"] for d in STORE.snapshot["index"]["docs"]]
+        passages = [{"id": j, "text": dtitles[chunks[h["i"]]["doc"]] + ". " + chunks[h["i"]]["text"]} for j, h in enumerate(hits)]
         out = ranker.rerank(RerankRequest(query=query, passages=passages))
         res = []
         for p in out[:k]:
@@ -203,10 +210,24 @@ async def search(req: Request):
     rrf = W_SEMANTIC / (RRF_K + ranks(sem)) + W_KEYWORD * (kw > 0) / (RRF_K + ranks(kw))
     order = [int(i) for i in np.argsort(-rrf)[:max(k, RERANK_CANDIDATES)]]
     hits = [{"i": i, "score": float(rrf[i]), "sem": float(sem[i]), "kw": float(kw[i])} for i in order]
-    reranked = await asyncio.to_thread(rerank, query, hits, snap["index"]["chunks"], k)
+    chunks_ = snap["index"]["chunks"]
+    reranked = await asyncio.to_thread(rerank, query, hits, chunks_, k)
     if reranked is not None:
+        top = reranked[0]["score"] if reranked else 0.0
+        level = "high" if top >= 0.75 else "medium" if top >= 0.35 else "low"
+        docs = snap["index"]["docs"]
+        for h in reranked:                                # provenance of every citation
+            c = chunks_[h["i"]]
+            d = docs[c["doc"]]
+            h["prov"] = {"doc_id": d["id"], "uid": d["uid"], "title": d["title"], "sha256": d.get("sha256", ""),
+                         "page": c["page"], "rev": d.get("rev", "1.0"), "date": d.get("date", "")}
+        top_sem = max(h["sem"] for h in hits)            # best embedding cosine among the candidates
+        if top < MIN_RERANK_CONFIDENCE and top_sem < MIN_SEMANTIC_SIM:   # both signals say "not in the documents"
+            return {"mode": "unconfident", "version": snap["version"], "hits": [], "confidence": top, "level": "low",
+                    "top_sem": top_sem, "top_kw": max(h["kw"] for h in hits),
+                    "message": "No confident match found in the uploaded documents."}
         return {"mode": "hybrid+rerank", "model": EMBED_MODEL, "reranker": RERANK_MODEL,
-                "version": snap["version"], "hits": reranked}
+                "version": snap["version"], "confidence": top, "level": level, "hits": reranked}
     return {"mode": "hybrid", "model": EMBED_MODEL, "version": snap["version"], "hits": hits[:k]}
 
 
@@ -234,7 +255,18 @@ async def files_upload(files: list[UploadFile] = File(...)):
             added.append(STORE.add(f.filename or "file", await f.read()))
         except ValueError as e:
             errors.append(str(e))
-    return JSONResponse({"added": added, "errors": errors}, status_code=200 if added or not errors else 400)
+    return JSONResponse({"added": added, "errors": errors, "jobs": [a["uid"] for a in added]},
+                        status_code=200 if added or not errors else 400)
+
+
+@app.get("/api/files/status/{job_id}")
+def files_status(job_id: str):
+    """Live progress of one upload (job id = document uid): stage + progress, e.g. rendering_pages 42/95."""
+    e = STORE.doc_entry(job_id) if re.fullmatch(r"[0-9a-f]{12}", job_id) else None
+    if not e:
+        return JSONResponse({"error": "unknown job"}, 404)
+    return {"job_id": job_id, "name": e["name"], "status": e["status"], "stage": e.get("stage", "done"),
+            "progress": e.get("progress", "done"), "pages": e["pages"], "error": e["error"]}
 
 
 @app.delete("/api/files/{uid}")

@@ -41,6 +41,8 @@
 - **Vector store: Qdrant** (embedded mode, no server needed, persistent in `backend/data/qdrant/`, cosine). It is created automatically on first start. On later starts existing vectors are reused: only new or changed chunks are embedded, and chunks of deleted documents are removed (no duplicates). Delete the `qdrant` folder to rebuild it. Only one process can open the folder at a time. If Qdrant can't load, the old `.npy` cache is used.
 - After the hybrid search, a **FlashRank cross-encoder** (`ms-marco-TinyBERT-L-2-v2`, ONNX/CPU, downloaded once) re-scores the top 20 and keeps the best 8 (`mode: hybrid+rerank`). If it cannot load, plain RRF order is used.
 - PDF text comes from `pymupdf4llm` (markdown with tables). Tables are never split mid-row. If PyMuPDF cannot load (Windows Application Control), `pypdfium2` is used (plain text).
+- **Confidence:** the top reranker score is returned as `confidence`. A question is treated as "not in the documents" (`mode: unconfident`, no citations) only when the rerank score < 0.20 AND the embedding similarity < 0.65 (env `VR_RAG_MIN_CONFIDENCE`, `VR_RAG_MIN_SEMANTIC`).
+- **Benchmark:** `python backend/test_rag_eval.py --answers` (use `backend/.venv/Scripts/python.exe`) runs golden questions against the running app.
 - Streaming answers: `POST /api/grok/stream` (SSE). Spoken answers: `POST /api/tts` (needs internet).
 - No Python? Use `START_VR_RAG_POWERSHELL.bat`, the old server with keyword search only.
 

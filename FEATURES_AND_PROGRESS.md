@@ -58,6 +58,14 @@ A voice-first Augmented Reality (AR/VR) Retrieval-Augmented Generation (RAG) ass
 - **Table-aware chunking** (`pymupdf4llm` markdown; tables are never cut mid-row) and **FlashRank cross-encoder reranking** (top 20 -> top 8).
 - **Page image LRU cache** (6 pages) in the VR panel; `/api/server/stop` is local-only; `.env` support.
 
+### 🧭 Trust, confidence & ingestion (added, see NEXT_STEPS_ACTION_PLAN.md)
+- **Live voice:** sentences are spoken while the answer streams (`LiveSpeaker`).
+- **Confidence gating:** `/api/search` returns `confidence`/`level`; off-topic questions return `mode: unconfident` (no citations, general answer, red chip). Green/amber/red border + chip in VR and in the DOM panel.
+- **Provenance:** every hit has `prov` (doc sha256, page, rev, date); ProcOps approvals are stamped (agent, base version, document/page hashes, classification) and shown in the dashboard history.
+- **Upload progress:** `GET /api/files/status/{job_id}` + live progress bar on `/upload`.
+- **Modular VR client:** `xr-panels.js`, `ui-overlay.js`, `rag-scene.js` (coordinator).
+- **Benchmark:** `backend/test_rag_eval.py [--answers]`. ADRs in `docs/adr/`.
+
 ---
 
 ## 2. Progress Till Now

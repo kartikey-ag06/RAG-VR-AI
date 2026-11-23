@@ -303,9 +303,9 @@ export async function serverSearch(index, query, k = 8) {
     const j = await r.json();
     const hits = (j.hits || []).map((h) => {
       const chunk = index.data.chunks[h.i];
-      return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw };
+      return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw, prov: h.prov };
     });
-    return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits };
+    return { mode: j.mode, version: j.version, confidence: j.confidence ?? null, level: j.level || '', message: j.message || '', hits: j.version && j.version !== index.data.version ? [] : hits };
   } catch { return null; }
 }
 

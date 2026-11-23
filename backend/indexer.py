@@ -193,15 +193,17 @@ def split_words_into_pages(text):
     return pages or [""]
 
 
-def extract(path, ext, page_dir, title):
-    """Returns the list of page texts and writes pNNN.jpg for every page."""
+def extract(path, ext, page_dir, title, progress=None):
+    """Returns the list of page texts and writes pNNN.jpg for every page.
+    progress(done, total) is called after every page (used for the live upload progress bar)."""
+    progress = progress or (lambda done, total: None)
     page_dir.mkdir(parents=True, exist_ok=True)
     if ext == ".pdf":
         try:
             import pymupdf
         except ImportError as ex:        # e.g. Windows Application Control blocks PyMuPDF's DLL
             print(f"[index] PyMuPDF unavailable ({str(ex)[:80]}), using pypdfium2 (plain text, no tables)", flush=True)
-            return _extract_pdf_pdfium(path, page_dir)
+            return _extract_pdf_pdfium(path, page_dir, progress)
         texts = []
         with pymupdf.open(path) as doc:
             md_ok = True
@@ -220,6 +222,7 @@ def extract(path, ext, page_dir, title):
                 if not txt or not txt.strip():
                     txt = page.get_text()
                 texts.append(txt)
+                progress(i + 1, len(doc))
                 zoom = IMG_W / page.rect.width
                 page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(str(page_dir / f"p{i + 1:03d}.jpg"), jpg_quality=70)
         return texts
@@ -237,10 +240,11 @@ def extract(path, ext, page_dir, title):
     pages = split_words_into_pages(text)
     for i, t in enumerate(pages):
         render_text_page(t, title, i + 1, len(pages), page_dir / f"p{i + 1:03d}.jpg")
+        progress(i + 1, len(pages))
     return pages
 
 
-def _extract_pdf_pdfium(path, page_dir):
+def _extract_pdf_pdfium(path, page_dir, progress=lambda d, t: None):
     """Fallback PDF reader (pypdfium2) for machines where PyMuPDF cannot load. Plain text, no table layout."""
     import pypdfium2 as pdfium
     texts = []
@@ -254,6 +258,7 @@ def _extract_pdf_pdfium(path, page_dir):
             scale = IMG_W / page.get_width()
             page.render(scale=scale).to_pil().convert("RGB").save(page_dir / f"p{i + 1:03d}.jpg", "JPEG", quality=70)
             page.close()
+            progress(i + 1, len(pdf))
     finally:
         pdf.close()
     return texts
@@ -297,6 +302,7 @@ class Store:
         self.lock = threading.RLock()
         self.queue = []
         self.wake = threading.Event()
+        self._titles = {}
         self.qdrant = None              # embedded QdrantClient, created lazily by _sync_qdrant
         self.embedder = None            # set by app.py once the embedding model is loaded
         self.model_name = ""
@@ -406,8 +412,14 @@ class Store:
             image = f"p{page:03d}_r{n}.jpg"
             render_text_page(text, e["title"], page, e["pages"], self.pages / uid / image,
                              banner=f"REVISED v{version} - approved {when[:10]}" + (f" by {approver}" if approver else ""))
+            old_text = self.page_text(uid, page, original=True) or ""
             rec = {"n": n, "version": version, "page": page, "summary": summary[:500], "approver": approver[:80],
-                   "approved": when, "evidence": int(evidence)}
+                   "approved": when, "evidence": int(evidence),
+                   # provenance stamp (audit trail)
+                   "agent": "vr-rag-procops", "base_version": r["version"] if n > 1 else "1.0",
+                   "base_doc_sha256": e.get("sha256", ""), "base_page_sha256": hashlib.sha256(old_text.encode("utf-8")).hexdigest(),
+                   "revised_page_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                   "doc_title": e["title"], "classification": "internal"}
             r["version"] = version
             r["pages"][str(page)] = {"text": text, "version": version, "image": image, "approved": when}
             r["history"].append(rec)
@@ -467,6 +479,11 @@ class Store:
             try:
                 self.state = "indexing"
                 self._rebuild()
+                with self.lock:
+                    for e in self.manifest:
+                        if e.get("stage") in ("queued_for_index", "embedding_qdrant"):
+                            e.update(stage="done", progress="done")
+                    self._save_manifest()
             except Exception as ex:      # keep the old snapshot if a rebuild fails
                 print(f"[index] rebuild failed: {ex}", flush=True)
             self.state = "idle"
@@ -478,14 +495,18 @@ class Store:
             return
         t0 = time.time()
         try:
-            texts = extract(self.files / f"{uid}{e['ext']}", e["ext"], self.pages / uid, e["title"])
+            def prog(done, total):
+                e.update(stage="rendering_pages", progress=f"{done}/{total}")
+            e.update(stage="rendering_pages", progress="0/?")
+            texts = extract(self.files / f"{uid}{e['ext']}", e["ext"], self.pages / uid, e["title"], prog)
             (self.pages / uid / "text.json").write_text(json.dumps(texts), "utf-8")
             words = sum(len(t.split()) for t in texts)
-            e.update(pages=len(texts), status="ready" if words else "error",
+            e.update(pages=len(texts), stage="queued_for_index" if words else "error", progress=f"{len(texts)}/{len(texts)}",
+                     status="ready" if words else "error",
                      error="" if words else "No text found (scanned PDF? OCR is not supported yet)")
             print(f"[index] {e['name']}: {len(texts)} pages, {words} words in {time.time() - t0:.1f}s", flush=True)
         except Exception as ex:
-            e.update(status="error", error=str(ex)[:300])
+            e.update(status="error", stage="error", error=str(ex)[:300])
             print(f"[index] {e['name']} FAILED: {ex}", flush=True)
         with self.lock:
             self._save_manifest()
@@ -501,14 +522,17 @@ class Store:
                 if 1 <= int(pno) <= len(texts):
                     texts[int(pno) - 1] = pr["text"]
             e["_revn"] = len(rev.get("history", []))
+            dm = re.match(r"^\d+_(\d{4}-\d{2})_", e["name"])
             index_docs.append({"id": pos, "file": e["name"], "title": e["title"], "pages": len(texts),
-                               "type": e["type"], "uid": e["uid"], "rev": rev.get("version", "1.0")})
+                               "type": e["type"], "uid": e["uid"], "rev": rev.get("version", "1.0"),
+                               "sha256": e.get("sha256", ""), "date": dm.group(1) if dm else e["uploaded"][:10]})
             for pno, t in enumerate(texts, start=1):
                 for c in chunk_page(t):
                     chunks.append({"doc": pos, "page": pno, "text": c})
                     chunk_doc_uid.append(e["uid"])
         # TF-IDF (identical maths to build_index.py)
-        toks = [tokenize(c["text"]) for c in chunks]
+        self._titles = {d["id"]: d["title"] for d in index_docs}
+        toks = [tokenize(self._etext(c)) for c in chunks]      # contextual retrieval: the document title/date is part of every chunk
         df = Counter()
         for t in toks:
             df.update(set(t))
@@ -525,6 +549,10 @@ class Store:
             c["weights"] = [round(v / norm, 4) for _, v in items]
         version = int(time.time() * 1000)
         index = {"version": version, "docs": index_docs, "vocab": vocab, "idf": idf, "chunks": chunks}
+        with self.lock:
+            for e in self.manifest:
+                if e.get("stage") == "queued_for_index":
+                    e["stage"] = "embedding_qdrant"
         ids, col, cname = self._sync_qdrant(docs, chunks, chunk_doc_uid)   # Qdrant vector store (created on first run)
         matrix = None if col is not None else self._embeddings(docs, chunks, chunk_doc_uid)   # .npy fallback
         (self.root / "index.json").write_text(json.dumps(index, ensure_ascii=False), "utf-8")
@@ -533,6 +561,11 @@ class Store:
                              "uids": [d["uid"] for d in docs], "ids": ids, "idpos": {i: j for j, i in enumerate(ids or [])}, "qdrant": col, "qname": cname}
         print(f"[index] ready: {len(docs)} docs, {n} chunks, embeddings "
               f"{'qdrant' if col is not None else ('npy' if matrix is not None else 'no')}", flush=True)
+
+    def _etext(self, c):
+        """Text that is searched and embedded: the document title (with its date) + the chunk, so a question
+        like "the 2018 order on RIL" can find a chunk that never repeats the year."""
+        return f"{self._titles.get(c['doc'], '')}. {c['text']}"
 
     def _sync_qdrant(self, docs, chunks, chunk_doc_uid):
         """Keeps the persistent Qdrant collection (embedded mode, data/qdrant) in step with the current chunks.
@@ -558,7 +591,7 @@ class Store:
             pos, ids = {}, []
             for c, u in zip(chunks, chunk_doc_uid):
                 k = pos[u] = pos.get(u, -1) + 1
-                ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{u}:{k}:{hashlib.sha1(c['text'].encode('utf-8')).hexdigest()}")))
+                ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{u}:{k}:{hashlib.sha1(self._etext(c).encode('utf-8')).hexdigest()}")))
             have, offset = set(), None
             while True:
                 pts, offset = q.scroll(name, limit=2000, offset=offset, with_payload=False, with_vectors=False)
@@ -572,7 +605,7 @@ class Store:
             todo = [(i, c) for i, c in zip(ids, chunks) if i not in have]
             for b in range(0, len(todo), 64):
                 part = todo[b:b + 64]
-                vecs = np.array(list(self.embedder.passage_embed([c["text"] for _, c in part], batch_size=32)), dtype=np.float32)
+                vecs = np.array(list(self.embedder.passage_embed([self._etext(c) for _, c in part], batch_size=32)), dtype=np.float32)
                 vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
                 q.upsert(name, points=[models.PointStruct(id=i, vector=v.tolist(), payload={"doc": c["doc"], "page": c["page"]})
                                        for (i, c), v in zip(part, vecs)])
@@ -589,7 +622,7 @@ class Store:
         tag = self.model_name.replace("/", "_")
         parts = []
         for e in docs:
-            texts = [c["text"] for c, u in zip(chunks, chunk_doc_uid) if u == e["uid"]]
+            texts = [self._etext(c) for c, u in zip(chunks, chunk_doc_uid) if u == e["uid"]]
             f = self.emb / (f"{e['uid']}_{tag}.npy" if not e.get("_revn") else f"{e['uid']}_{tag}_r{e['_revn']}.npy")
             m = np.load(f) if f.exists() else None
             if m is None or m.shape[0] != len(texts):
