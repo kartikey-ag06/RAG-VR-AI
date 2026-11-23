@@ -8,6 +8,10 @@
       "destination": "https://vr-rag-backend.onrender.com/api/:path*"
     },
     {
+      "source": "/theme/:path*",
+      "destination": "https://vr-rag-backend.onrender.com/theme/:path*"
+    },
+    {
       "source": "/upload",
       "destination": "https://vr-rag-backend.onrender.com/upload"
     },
@@ -18,6 +22,22 @@
     {
       "source": "/rag/:path*",
       "destination": "https://vr-rag-backend.onrender.com/rag/:path*"
+    },
+    {
+      "source": "/workspace",
+      "destination": "https://vr-rag-backend.onrender.com/workspace"
+    },
+    {
+      "source": "/expert",
+      "destination": "https://vr-rag-backend.onrender.com/expert"
+    },
+    {
+      "source": "/admin",
+      "destination": "https://vr-rag-backend.onrender.com/admin"
+    },
+    {
+      "source": "/mcp",
+      "destination": "https://vr-rag-backend.onrender.com/mcp"
     }
   ]
 }

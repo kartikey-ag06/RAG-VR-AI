@@ -75,6 +75,8 @@
   #zoom { position:fixed; inset:0; background:rgba(0,0,0,.8); display:none; align-items:center; justify-content:center; z-index:9; cursor:zoom-out; }
   #zoom img { max-height:95vh; max-width:95vw; background:#fff; }
 </style>
+<link rel="stylesheet" href="/theme/vr-theme.css">
+<script src="/theme/vr-shell.js" defer></script>
 </head>
 <body>
 <main>
@@ -84,8 +86,6 @@
       <div class="sub">Every job done is a test run of the manual. A worker's question is a bug report for the page.</div>
     </div>
     <div>
-      <a class="btn" href="/" target="_blank">Open glasses app</a>
-      <a class="btn" href="/upload" target="_blank">Upload docs</a>
       <button id="reset" title="Restore all original pages and archive the question log">Reset demo</button>
     </div>
   </header>
@@ -121,11 +121,18 @@
       <div id="gaps"><div class="empty">None yet.</div></div>
     </section>
   </div>
+
+  <div class="row2" style="grid-template-columns:1fr 1fr 1fr">
+    <section class="card"><h2>Most asked <small>all questions</small></h2><div id="a-most"><div class="empty">None yet.</div></div></section>
+    <section class="card"><h2>Low-confidence answers <small>weak match - manual may be unclear or outdated</small></h2><div id="a-low"><div class="empty">None yet.</div></div></section>
+    <section class="card"><h2>Zero-hit questions <small>no document matched - content is missing</small></h2><div id="a-zero"><div class="empty">None yet.</div></div></section>
+  </div>
 </main>
 <div id="toast"></div>
 <div id="zoom"><img alt=""></div>
 
 <script>
+const vfetch = (u, o = {}) => { let t = ''; try { t = localStorage.getItem('vr-admin-token') || ''; } catch {} o.headers = Object.assign({}, o.headers || {}, t ? { 'X-VR-Token': t } : {}); return fetch(u, o); };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let data = null, sel = null, drafting = false, draft = null, lastSig = '';
@@ -143,7 +150,7 @@ const when = (iso) => iso ? new Date(iso).toLocaleString() : '';
 
 async function load() {
   try {
-    const r = await fetch('/api/procops/summary', { cache: 'no-store' });
+    const r = await vfetch('/api/procops/summary', { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     data = await r.json();
   } catch (e) { $('docs').innerHTML = `<div class="empty">Backend not reachable (${esc(e.message)}). Start START_VR_RAG.bat.</div>`; return; }
@@ -191,6 +198,11 @@ function render() {
     data.gaps.map((g) => `<tr><td>${esc(g.q)}</td><td>${g.n}×</td></tr>`).join('') + '</table>'
     : '<div class="empty">None yet. Questions that no document answers will appear here - they show what is missing from the manuals.</div>';
 
+  const an = data.analytics || { mostAsked: [], lowConfidence: [], zeroHit: [] };
+  $('a-most').innerHTML = an.mostAsked.length ? '<table><tr><th>Question</th><th>Asked</th></tr>' + an.mostAsked.map((g) => `<tr><td>${esc(g.q)}</td><td>${g.n}×</td></tr>`).join('') + '</table>' : '<div class="empty">None yet.</div>';
+  $('a-low').innerHTML = an.lowConfidence.length ? '<table><tr><th>Question</th><th>Match</th></tr>' + an.lowConfidence.map((g) => `<tr><td>${esc(g.q)}<div class="muted small">${esc(g.title || '')}${g.page ? ' · p.' + g.page : ''}</div></td><td>${Math.round(g.conf * 100)}%</td></tr>`).join('') + '</table>' : '<div class="empty">None yet.</div>';
+  $('a-zero').innerHTML = an.zeroHit.length ? '<table><tr><th>Question</th><th>Asked</th></tr>' + an.zeroHit.map((g) => `<tr><td>${esc(g.q)}</td><td>${g.n}×</td></tr>`).join('') + '</table>' : '<div class="empty">None yet.</div>';
+
   if (sel && !drafting && !draft) {
     const sig = JSON.stringify(current().p) + data.indexVersion;
     if (sig !== lastSig) renderDetail();
@@ -227,7 +239,7 @@ async function makeDraft() {
   const b = $('btn-draft'); b.disabled = true; b.textContent = 'AI is reading the page and the questions...';
   drafting = true;
   try {
-    const r = await fetch('/api/procops/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sel) });
+    const r = await vfetch('/api/procops/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sel) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
     draft = j; showDraft();
@@ -257,7 +269,7 @@ async function approve() {
   try { localStorage.setItem('procops-approver', approver); } catch (e) {}
   const b = $('btn-approve'); b.disabled = true; b.textContent = 'Publishing...';
   try {
-    const r = await fetch('/api/procops/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await vfetch('/api/procops/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...sel, text: $('newtext').value, approver, summary: draft.change_summary.join('; ') || draft.issue, evidence: draft.evidence.length }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
@@ -279,12 +291,13 @@ document.addEventListener('click', (e) => {
 $('zoom').onclick = () => ($('zoom').style.display = 'none');
 $('reset').onclick = async () => {
   if (!confirm('Reset the demo? All pages go back to their original version (revisions are archived) and the question log is archived.')) return;
-  await fetch('/api/procops/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: true }) });
+  await vfetch('/api/procops/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: true }) });
   sel = null; draft = null; $('detail').innerHTML = '<div class="empty">Demo reset. Ask questions in the glasses app.</div>';
   toast('Demo reset.'); setTimeout(load, 1200);
 };
 load();
-setInterval(() => { if (!document.hidden) load(); }, 4000);
+setInterval(() => { if (!document.hidden) load(); }, 20000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 </script>
 </body>
 </html>

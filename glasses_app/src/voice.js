@@ -6,7 +6,7 @@ import { transcribe } from './rag.js';
 
 const MAX_SECONDS = 15;
 
-export function setupVoice({ button, onState, onText, useServer, label }) {
+export function setupVoice({ button, onState, onText, useServer, label, getLang, onStart, onStop }) {
   const idleLabel = label || button.textContent;
   let rec = null, chunks = [], stream = null, timer = null, speech = null, active = false, startedAt = 0;
 
@@ -20,6 +20,7 @@ export function setupVoice({ button, onState, onText, useServer, label }) {
     if (active) return;
     if (mode === 'none') { onState('error', 'Voice not supported in this browser - use Chrome'); return; }
     active = true; startedAt = Date.now();
+    if (onStart) onStart();                 // e.g. pause the always-on listener (one mic user at a time)
     button.classList.add('rec'); button.textContent = '■ Listening… tap to stop';
     if (mode === 'browser') return startBrowser();
     try {
@@ -53,7 +54,7 @@ export function setupVoice({ button, onState, onText, useServer, label }) {
     if (secs < 0.6 || blob.size < 800) { onState('error', 'Too short - hold V (or keep recording) while you speak'); return; }
     onState('transcribing', 'Transcribing with Groq Whisper...');
     try {
-      const text = await transcribe(blob);
+      const text = await transcribe(blob, getLang ? getLang().iso : '');
       if (!text) { onState('error', 'Could not hear any words - try again closer to the mic'); return; }
       onState('done', ''); onText(text);
     } catch (e) {
@@ -63,7 +64,7 @@ export function setupVoice({ button, onState, onText, useServer, label }) {
 
   function startBrowser() {
     speech = new SpeechRec();
-    speech.lang = 'en-IN'; speech.interimResults = true; speech.maxAlternatives = 1;
+    speech.lang = getLang ? getLang().code : 'en-IN'; speech.interimResults = true; speech.maxAlternatives = 1;
     let finalText = '';
     speech.onresult = (e) => {
       let interim = '';
@@ -78,6 +79,7 @@ export function setupVoice({ button, onState, onText, useServer, label }) {
   }
 
   function reset() {
+    if (active && onStop) setTimeout(onStop, 400);
     active = false; clearTimeout(timer);
     button.classList.remove('rec'); button.textContent = idleLabel;
   }

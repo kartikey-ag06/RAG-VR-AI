@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VR_RAG - Workspace</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --warn:#e0a63a; --bad:#e5596b; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width:1280px; margin:0 auto; padding:24px 20px 60px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  h1 { margin:0; font-size:22px; } h1 span { color:var(--accent); } .sub { color:var(--muted); margin:2px 0 0; }
+  a.btn, button, select { border:1px solid var(--line); background:#1a2540; color:var(--text); padding:6px 11px; border-radius:8px; text-decoration:none; cursor:pointer; font:inherit; font-size:13px; }
+  .grid { display:grid; grid-template-columns: 1.4fr 1fr; gap:16px; } @media (max-width:950px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 10px; display:flex; justify-content:space-between; align-items:baseline; } h2 small { color:var(--muted); font-weight:400; font-size:12px; }
+  .pins { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:10px; }
+  .pin { background:#0e1424; border:1px solid var(--line); border-radius:10px; padding:8px; font-size:12px; }
+  .pin img { width:100%; border-radius:6px; background:#fff; display:block; margin-bottom:6px; max-height:200px; object-fit:cover; object-position:top; }
+  .pin .t { font-weight:600; } .pin .m { color:var(--muted); font-size:11px; } .pin p { margin:4px 0; max-height:90px; overflow:hidden; }
+  table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .empty { color:var(--muted); font-size:13px; padding:8px 0; } .muted { color:var(--muted); font-size:12px; }
+  .log { max-height:260px; overflow:auto; background:#0b101c; border-radius:8px; padding:8px; font:12px/1.5 Consolas, monospace; white-space:pre-wrap; margin-top:8px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .chip { display:inline-block; background:#16304f; color:#9fd0ff; border-radius:9px; padding:0 7px; font-size:11px; }
+  #toast { position:fixed; bottom:18px; right:18px; background:#14351f; border:1px solid var(--ok); padding:10px 14px; border-radius:10px; display:none; }
+</style>
+<link rel="stylesheet" href="/theme/vr-theme.css">
+<script src="/theme/vr-shell.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1><span>Workspace</span> · synced with the glasses</h1><div class="sub">Pins, work sessions, meetings, your calendar, reminders, notes and scripts. Refreshes every 20 seconds and when you come back to the tab.</div></div>
+    
+  </header>
+  <div class="grid">
+    <div>
+      <section class="card"><h2>📌 Pinned in 3D space <small id="pin-n"></small></h2><div class="pins" id="pins"></div></section>
+      <section class="card"><h2>🧰 Work sessions <small>audit trail of everything asked, scanned and done</small></h2>
+        <div id="sessions"></div><div id="sdetail"></div></section>
+      <section class="card" id="meetings"><h2>🗣 Meetings <small>transcript, AI summary and action items</small></h2>
+        <div id="mts"></div><div id="mdetail"></div></section>
+    </div>
+    <div>
+      <section class="card" id="calendar"><h2>📅 Today <small id="cal-day"></small></h2><div id="cal"></div>
+        <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Link a Google / Outlook calendar</summary>
+          <div class="muted" style="margin:8px 0">Google: Calendar settings → your calendar → <b>Secret address in iCal format</b>.
+            Outlook: Settings → Calendar → Shared calendars → <b>Publish a calendar</b> → ICS link. Read-only; the link stays on the server.</div>
+          <div class="row"><input id="cal-name" placeholder="Name (Work)" style="width:110px"><input id="cal-url" placeholder="https://… .ics" style="flex:1;min-width:180px">
+            <button id="cal-add" class="primary">Link</button></div>
+          <div id="cal-src" style="margin-top:8px"></div></details></section>
+      <section class="card"><h2>⏰ Reminders</h2><div id="rem"></div></section>
+      <section class="card"><h2>🎤 Teleprompter scripts</h2><div id="scr"></div></section>
+      <section class="card"><h2>📝 Notes</h2><div id="notes"></div></section>
+      <section class="card"><h2>🧭 Guided procedures</h2><div id="wfs"></div></section>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const j = async (u, o) => { const r = await fetch(u, Object.assign({ cache: 'no-store' }, o)); return r.json(); };
+const when = (s) => {           // "Today 5:00 PM", "Tomorrow 9:00 AM", "Mon 21 Nov, 10:47 AM"
+  if (!s) return '';
+  const d = new Date(typeof s === 'number' ? s * 1000 : s), t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(), diff = Math.round((day(d) - day(new Date())) / 864e5);
+  return diff === 0 ? 'Today ' + t : diff === 1 ? 'Tomorrow ' + t : diff === -1 ? 'Yesterday ' + t
+    : d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }) + ', ' + t;
+};
+let open = null, openMeeting = null, connectors = [];
+const tok = () => { try { return localStorage.getItem('vr-admin-token') || ''; } catch { return ''; } };
+const jp = (u, body, method = 'POST') => j(u, { method, headers: Object.assign({ 'Content-Type': 'application/json' }, tok() ? { 'X-VR-Token': tok() } : {}), body: body ? JSON.stringify(body) : undefined });
+const mins = (s) => s >= 60 ? Math.round(s / 60) + ' min' : Math.round(s) + ' s';
+function toast(m) { const t = $('toast'); t.textContent = m; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 3500); }
+
+async function load() {
+  const tz = -new Date().getTimezoneOffset();
+  const [p, s, r, n, w, mt, cal, src, sc] = await Promise.all([j('/api/pins'), j('/api/sessions'), j('/api/reminders?all=1'), j('/api/notes'), j('/api/workflows'),
+    j('/api/meetings'), j('/api/calendar?day=today&tz=' + tz), j('/api/calendar/sources'), j('/api/teleprompter/scripts')]);
+  $('mts').innerHTML = mt.meetings.length ? `<table><tr><th>Meeting</th><th>Length</th><th>Actions</th><th>Export</th></tr>${mt.meetings.slice(0, 12).map((x) => `<tr>
+      <td><a href="#" data-mopen="${x.id}" style="color:var(--accent)">${esc(x.title)}</a><div class="muted">${when(x.started)}${x.status === 'recording' ? ' · <b style="color:var(--bad)">● recording</b>' : ''}</div></td>
+      <td class="muted">${mins(x.seconds || 0)} · ${x.segments} lines</td><td>${x.actions}</td>
+      <td class="row"><a class="btn" href="/api/meetings/${x.id}/export?format=pdf" target="_blank">PDF</a><a class="btn" href="/api/meetings/${x.id}/export?format=docx" target="_blank">DOCX</a>
+        <a class="btn" href="/api/meetings/${x.id}/export?format=md" target="_blank">MD</a><button data-mdel="${x.id}" title="Delete">✕</button></td></tr>`).join('')}</table>`
+    : '<div class="empty">In the glasses: 🛠 Tools → 📝 Meeting notes, or say "start meeting notes".</div>';
+  $('cal-day').textContent = cal.day + (cal.linked ? ` · ${cal.linked} linked calendar${cal.linked > 1 ? 's' : ''}` : '');
+  $('cal').innerHTML = (cal.events.length ? '<table>' + cal.events.map((x) => `<tr><td style="width:84px"><b>${esc(x.local)}</b>${x.end ? `<div class="muted">to ${esc(x.end)}</div>` : ''}</td>
+      <td>${x.calendar ? '📅' : (x.done ? '✅' : '⏰')} ${esc(x.text)}${x.location ? `<div class="muted">📍 ${esc(x.location)}</div>` : ''}</td><td class="muted">${esc(x.source || 'reminder')}</td></tr>`).join('') + '</table>'
+    : '<div class="empty">Nothing today.</div>') + (cal.errors && cal.errors.length ? `<div class="muted" style="color:var(--warn)">⚠ ${cal.errors.map(esc).join(' · ')}</div>` : '');
+  $('cal-src').innerHTML = src.sources.map((x) => `<div class="row" style="margin:4px 0"><span class="chip">${esc(x.name)}</span><span class="muted" style="flex:1">${esc(x.url)}</span><button data-cdel="${x.id}">Unlink</button></div>`).join('');
+  $('scr').innerHTML = sc.scripts.length ? '<table>' + sc.scripts.slice(0, 10).map((x) => `<tr><td><details><summary>${esc(x.title)}</summary><div class="log">${esc(x.text)}</div></details>
+      ${x.sources && x.sources.length ? `<div class="muted">From: ${x.sources.map((y) => esc(y.title) + ' p.' + y.page).join(' · ')}</div>` : ''}</td><td class="muted">${when(x.created)}</td><td><button data-sdel="${x.id}">✕</button></td></tr>`).join('') + '</table>'
+    : '<div class="empty">Say "teleprompter for the pump safety briefing" in the glasses.</div>';
+  if (openMeeting) showMeeting(openMeeting);
+  $('pin-n').textContent = p.pins.length ? p.pins.length + ' pinned' : '';
+  $('pins').innerHTML = p.pins.length ? p.pins.map((x) => `<div class="pin">
+      ${x.uid && x.page ? `<img src="/api/pins/page/${x.uid}/${x.page}" alt="">` : ''}
+      <div class="t">${esc(x.title || x.kind)}</div><div class="m">${esc(x.kind)}${x.page ? ' · page ' + x.page : ''} · ${when(x.created)}</div>
+      ${x.text ? `<p>${esc(x.text)}</p>` : ''}<button data-unpin="${x.id}">Unpin</button></div>`).join('')
+    : '<div class="empty">Nothing pinned yet. In the glasses say "pin this" or press 📌.</div>';
+  $('sessions').innerHTML = s.sessions.length ? `<table><tr><th>Started</th><th>Machine</th><th>Entries</th><th>Report</th></tr>${s.sessions.slice(0, 15).map((x) => `<tr>
+      <td><a href="#" data-open="${x.id}" style="color:var(--accent)">${when(x.started)}</a><div class="muted">${esc(x.device || '')}</div></td>
+      <td>${x.machine ? `<span class="chip">${esc(x.machine)}</span>` : '-'}</td><td>${x.entries}</td>
+      <td class="row"><select data-kind="${x.id}"><option value="inspection">Inspection report</option><option value="incident">Incident log</option><option value="workorder">Work order</option></select>
+        <a class="btn" data-exp="${x.id}" data-f="pdf" href="#">PDF</a><a class="btn" data-exp="${x.id}" data-f="docx" href="#">DOCX</a><a class="btn" data-exp="${x.id}" data-f="json" href="#">JSON</a>
+        ${connectors.length ? `<select data-conn="${x.id}">${connectors.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button data-send="${x.id}">Send</button>` : ''}</td></tr>`).join('')}</table>`
+    : '<div class="empty">No sessions yet.</div>';
+  $('rem').innerHTML = r.reminders.length ? '<table>' + r.reminders.map((x) => `<tr><td>${x.done ? '✅' : '⏰'} ${esc(x.text)}</td><td class="muted">${x.due ? when(x.due) : 'no time'}</td>
+      <td>${x.done ? '' : `<button data-done="${x.id}">Done</button>`}</td></tr>`).join('') + '</table>' : '<div class="empty">Say "remind me at 5 to call Ravi" in the glasses.</div>';
+  $('notes').innerHTML = n.notes.length ? '<table>' + n.notes.map((x) => `<tr><td>${esc(x.text)}</td><td class="muted">${when(x.created)}</td><td><button data-delnote="${x.id}">✕</button></td></tr>`).join('') + '</table>' : '<div class="empty">Say "note: the strainer was dirty".</div>';
+  $('wfs').innerHTML = w.workflows.length ? '<table>' + w.workflows.slice(0, 12).map((x) => `<tr><td>${esc(x.title)}<div class="muted">${x.steps} steps${x.machine ? ' · ' + esc(x.machine) : ''}</div></td><td class="muted">${when(x.created)}</td></tr>`).join('') + '</table>' : '<div class="empty">Say "guide me through starting pump P-101".</div>';
+  if (open) showSession(open);
+}
+async function showMeeting(id) {
+  openMeeting = id;
+  const m = await j('/api/meetings/' + id), s = m.summary || {};
+  const list = (h, a) => a && a.length ? `<b>${h}</b><ul>${a.map((x) => `<li>${esc(typeof x === 'string' ? x : x.task + (x.owner ? ' — ' + x.owner : '') + (x.due ? ' (due ' + x.due + ')' : ''))}</li>`).join('')}</ul>` : '';
+  $('mdetail').innerHTML = `<div style="margin-top:10px"><b>${esc(m.title)}</b>${s.summary ? `<p>${esc(s.summary)}</p>` : '<p class="muted">Summary appears when the meeting is stopped.</p>'}
+    ${list('Decisions', s.decisions)}${list('Action items', s.action_items)}${list('Open questions', s.open_questions)}
+    ${s.action_items && s.action_items.length ? `<button data-mrem="${id}">⏰ Add action items to reminders</button>` : ''}
+    <div class="log">${m.segments.map((x) => `[${x.clock}] ${esc(x.text)}`).join('\n') || 'No transcript yet.'}</div></div>`;
+}
+async function showSession(id) {
+  open = id;
+  const s = await j('/api/sessions/' + id);
+  $('sdetail').innerHTML = `<div class="log">${s.log.map((e) => `${e.t.slice(11, 19)} ${e.type.toUpperCase()}: ${esc(e.data.text || e.data.question || e.data.answer || JSON.stringify(e.data))}`).join('\n')}</div>`;
+}
+document.addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-unpin],[data-open],[data-exp],[data-send],[data-done],[data-delnote],[data-mopen],[data-mdel],[data-mrem],[data-cdel],[data-sdel],#cal-add');
+  if (t && t.tagName === 'A' && t.target === '_blank') return;
+  if (!t) return;
+  e.preventDefault();
+  if (t.dataset.unpin) { await fetch('/api/pins/' + t.dataset.unpin, { method: 'DELETE' }); toast('Unpinned (disappears from the glasses).'); }
+  if (t.dataset.open) showSession(t.dataset.open);
+  if (t.dataset.exp) { const k = document.querySelector(`[data-kind="${t.dataset.exp}"]`).value; window.open(`/api/sessions/${t.dataset.exp}/export?format=${t.dataset.f}&kind=${k}`, '_blank'); }
+  if (t.dataset.send) {
+    const k = document.querySelector(`[data-kind="${t.dataset.send}"]`).value, c = document.querySelector(`[data-conn="${t.dataset.send}"]`).value;
+    t.disabled = true; const r = await j(`/api/sessions/${t.dataset.send}/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connector: c, kind: k }) });
+    t.disabled = false; toast(r.sent ? 'Sent: ' + r.sent : 'Failed: ' + r.error);
+  }
+  if (t.dataset.done) await fetch('/api/reminders/' + t.dataset.done, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ done: true }) });
+  if (t.dataset.delnote) await fetch('/api/notes/' + t.dataset.delnote, { method: 'DELETE' });
+  if (t.dataset.mopen) await showMeeting(t.dataset.mopen);
+  if (t.dataset.mdel && confirmDel()) { await jp('/api/meetings/' + t.dataset.mdel, null, 'DELETE'); if (openMeeting === t.dataset.mdel) { openMeeting = null; $('mdetail').innerHTML = ''; } }
+  if (t.dataset.mrem) { const r = await jp(`/api/meetings/${t.dataset.mrem}/actions-to-reminders?tz=${-new Date().getTimezoneOffset()}`, {}); toast(`Added ${r.reminders} reminders`); }
+  if (t.dataset.sdel) await jp('/api/teleprompter/scripts/' + t.dataset.sdel, null, 'DELETE');
+  if (t.dataset.cdel) { const r = await jp('/api/calendar/sources/' + t.dataset.cdel, null, 'DELETE'); toast(r.error || 'Calendar unlinked'); }
+  if (t.id === 'cal-add') {
+    t.disabled = true; t.textContent = 'Checking…';
+    const r = await jp('/api/calendar/sources', { name: $('cal-name').value.trim() || 'Calendar', url: $('cal-url').value.trim() });
+    t.disabled = false; t.textContent = 'Link';
+    if (r.error) toast(r.error); else { toast(`Linked "${r.name}" (${r.events} events)`); $('cal-url').value = ''; $('cal-name').value = ''; }
+  }
+  load();
+});
+j('/api/connectors').then((c) => { connectors = c.connectors.filter((x) => (c.types[x.type] || {}).dir === 'out' && x.enabled); load(); });
+function confirmDel() { return window.confirm('Delete this meeting and its transcript?'); }
+setInterval(() => { if (!document.hidden && !document.querySelector('select:focus, input:focus, details[open] summary:focus')) load(); }, 20000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });   // fresh data when you come back to the tab
+if (location.hash) setTimeout(() => { const el = document.querySelector(location.hash); if (el) { el.scrollIntoView({ behavior: 'smooth' }); const d = el.querySelector('details'); if (d) d.open = true; } }, 600);
+</script>
+</body>
+</html>

@@ -1,5 +1,7 @@
 # secrets - never commit
 grok_api_key.txt
+database_url.txt
+turn.json
 .env
 
 # backups and build leftovers
@@ -13,3 +15,7 @@ __pycache__/
 backend/.venv/
 backend/cache/
 backend/data/
+
+_before_*/
+_*update*.tgz
+_*.tgz

@@ -118,7 +118,36 @@ The system supports multitasking by streaming companion web apps into floating V
 
 ---
 
-## 💡 9. Tips & Troubleshooting
+## 👓 9. Assistant Features (like Meta glasses)
+The panel has three tabs: **🎤 Ask**, **🛠 Tools** and **⚙ Settings**.
+- **Wake word**: in ⚙ Settings tick **"Hey Glasses" wake word**, then say *"Hey Glasses, what is the penalty?"* any time.
+- **Languages**: ⚙ Settings → **I speak** (your voice) and **Answers in** (the AI's answers). Tick **Read answers aloud** to hear them.
+- **Answer style**: *Full*, *Glance card* (3 short points + the cut-out diagram) or *Spoken* (one sentence, read aloud).
+- **Captions**: 🛠 → **💬 Captions** shows what people say on the lens; **🌐 Translate** also translates it.
+- **Live AI**: 🛠 → **👁 Live AI** – the AI looks at your view every 20 s (change in Settings) and writes a short note.
+- **Reminders / notes / calendar / weather**: say *"remind me at 5 pm to…"*, *"take a note…"*, *"what's on today"*, *"weather in Delhi"*. Due reminders pop up on the lens.
+- **Camera**: *"take a photo"*, *"start recording"*, **🎭 Filters** (OCR boost, low-light, edges, B&W, vintage, cartoon, AR glasses/hat), **🖼 Gallery** (download, ask AI). Faces are blurred before photos go to the AI (Settings).
+
+## 🏭 10. Field-Service Features
+- **Machine QR / barcode**: 🛠 → **🏷 QR / code** (or *"scan the QR code"*). If the code matches a machine id tagged on the upload page, answers use that machine's documents first (chip 🏷 at the top; ✕ to clear). Tag documents on the **Upload** page (Machine IDs field or the **Tags** button).
+- **Guided procedures**: *"guide me through starting pump P-101"*, then *"next"* / *"back"* / *"repeat"* (or N / B keys, or pinch). Each step shows its source page.
+- **Diagrams**: 🛠 → **📐 Diagram** shows the cut-out table / drawing of the current page.
+- **Pins**: *"pin this"* places the page or answer in 3D space around you; look at it for 2 s to get it explained (look-to-ask). Pins also show on the **Workspace** page.
+- **Reports**: *"export report"* → inspection report, incident log or work order as PDF / Word / JSON, or send it to a connector (set up on **Admin**).
+- **Remote expert**: *"call expert"* (suggested automatically when the AI is unsure). The expert opens the **Expert** page, sees your view, talks to you and sends tips that appear on your lens.
+- **Admin page**: create users and groups (document permissions), add connectors (webhook, email, Jira, ServiceNow, folder sync), copy the MCP setup for other AI assistants.
+
+## 🎤 11. Talk, Meet and Move
+- **Teleprompter**: 🛠 → **🎤 Teleprompter**. Type a topic and press **✍ Write** (the AI writes it from your documents), or paste your own text, then **▶ Start**. In Chrome / Edge the line you are saying lights up as you speak; elsewhere it scrolls at your speed (Settings). Keys: Space pause, ↑ ↓ line, + / − speed, Esc close. Voice: *"teleprompter for the pump safety briefing"*.
+- **Meeting notes**: 🛠 → **📝 Meeting notes** (or *"start meeting notes"*). Everything said is written down. Press it again (or *"stop meeting notes"*) for the AI summary, decisions and action items. Say *"add the action items to my reminders"*. All meetings are on **Workspace → Meetings** (PDF, Word, Markdown).
+- **Hand gestures**: 🛠 → **✋ Gestures** (needs a webcam). Pinch = talk, swipe = next / back, open palm (hold) = pause, thumbs up (hold) = scan. A small camera bubble shows your hand.
+- **Directions**: 🛠 → **🧭 Directions** or *"walk to India Gate"*, *"directions from Connaught Place to India Gate by car"*. The next turn shows on the lens and moves on as you walk; say *"next"* to skip, *"stop navigation"* to end. Allow location for the site.
+- **Your calendar**: **Workspace → 📅 Today → Link a Google / Outlook calendar**, paste the calendar's private ICS link. *"What's on today"* then lists your real meetings too.
+- **Recording light**: a red **REC / CAM / SCREEN** or amber **MIC** light shows on the lens (and on the panel) whenever anything is being captured.
+
+## 💡 12. Tips & Troubleshooting
+- **Expert call does not connect at work?** Office networks often block direct video calls. Ask your admin to set up the TURN relay (`deploy/turn/`) and set `TURN_URLS` + `TURN_SECRET`.
+- **Firefox / Safari:** wake word and captions work through the AI voice service instead of the browser (about 1 second slower).
 
 - **Microphone not responding?**  
   Ensure microphone permissions are enabled for your deployed domain in your browser settings (click the tune/lock icon in the address bar).

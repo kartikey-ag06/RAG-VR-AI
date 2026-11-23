@@ -111,3 +111,33 @@ Then type or speak a question, or just press **Enter** ("What is this, and what 
 - The text box is gone: ask by **voice** only (hold **V** or tap the big mic button). 📷 Photo asks about the photo straight away.
 - **☰ Apps**: Chrome, WhatsApp, Instagram, Email (Gmail), YouTube, ProcOps, Upload. Click an app → it opens in a new Chrome tab (sign in there) → click **Show in VR** → pick that tab in Chrome's share box. The tab appears as a live window in VR (newest in front, older ones to the sides; **Front** / **✕** in the drawer).
 - Windows are **mirrors (view only)**: WhatsApp/Instagram/Gmail block being embedded in other pages, so you reply/click in the real tab. Code: `glasses_app/src/apps.js`.
+
+
+## Phase 7: Meta-glasses features + enterprise toolkit
+Panel tabs in the glasses app: **🎤 Ask** (voice, scan, photo, apps) · **🛠 Tools** · **⚙ Settings**.
+| You say / press | What happens |
+|---|---|
+| "Hey Glasses, ..." (turn on in Settings) | asks hands-free |
+| "turn on captions and translate to Hindi" | live captions + translation on the lens |
+| "remind me at 5 pm to check the pump" · "what's on today" · "weather in Delhi" · "note: strainer was dirty" | daily assistant |
+| "take a photo" · "start / stop recording" · 🎭 Filters · 🖼 Gallery | camera, filters, AR face filters, gallery |
+| 🏷 QR / code or "scan the QR code" | machine id -> answers use that machine's manuals |
+| "guide me through starting pump P-101" then "next" | step-by-step procedure with sources |
+| "pin this" · look at a page for 2 s | 3D pins (also on /workspace) · look-to-ask |
+| "export report" | inspection report / incident log / work order (PDF, DOCX, JSON, or a connector) |
+| "call expert" | WebRTC call; the expert opens /expert |
+Pages: `/workspace` (pins, sessions, reports), `/expert` (expert console), `/admin` (users, connectors, MCP), `/procops` (now with knowledge-gap analytics).
+Storage: put a Postgres URL (Neon) in `database_url.txt` (git-ignored) or the `DATABASE_URL` environment variable; on the first start the local documents are copied into the database.
+Server env vars for internet deployments: `DATABASE_URL`, `ADMIN_TOKEN` (protects upload/admin), `MCP_TOKEN` (MCP access).
+
+
+## Phase 8: teleprompter, meetings, gestures, directions, calendar, privacy light
+| You say / press | What happens |
+|---|---|
+| "teleprompter for the pump safety briefing" · 🛠 → 🎤 Teleprompter | the AI writes a script from your documents (or paste one); it follows your voice in Chrome/Edge, else scrolls at your speed. Space pause · ↑↓ line · +/− speed · Esc close |
+| "start meeting notes" … "stop meeting notes" | every sentence transcribed (Whisper); AI summary, decisions, action items → `/workspace#meetings` (PDF / DOCX / MD) · "add the action items to my reminders" |
+| "start gestures" · 🛠 → ✋ Gestures | webcam hand tracking: pinch = talk, swipe = next/back, open palm = pause, 👍 = scan |
+| "walk to India Gate" · "directions from A to B by car" · 🛠 → 🧭 | OpenStreetMap route; the next turn on the lens, moves on with your GPS (or "next") |
+| `/workspace#calendar` → Link | Google / Outlook calendar via its private ICS link; events show in "what's on today" |
+| (automatic) | recording light on the lens: red REC / CAM / SCREEN, amber MIC |
+Limits fixed: TURN relay for expert calls (`TURN_URLS` + `TURN_SECRET`, or `turn.json`; coturn in `deploy/turn/`), real SharePoint / Google Drive / Confluence / Notion connectors (set up on `/admin`, steps in `backend/cloudsync.py`), wake word + captions in any browser (Whisper fallback when there is no built-in speech engine).

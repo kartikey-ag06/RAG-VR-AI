@@ -1,0 +1,13 @@
+# TURN relay for "Call remote expert" (coturn). Run it on any small Linux server with a public IP:
+#   1. Open ports 3478 (TCP+UDP) and 49160-49200 (UDP) in the firewall / AWS security group.
+#   2. Edit turnserver.conf: external-ip, realm and static-auth-secret.
+#   3. docker compose up -d
+#   4. In VR_RAG set TURN_URLS=turn:<server-ip>:3478?transport=udp,turn:<server-ip>:3478?transport=tcp
+#      and TURN_SECRET=<the same static-auth-secret>   (env vars on Render, or turn.json on the laptop)
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host            # TURN needs many UDP ports: host networking is simplest and fastest
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro

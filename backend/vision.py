@@ -8,6 +8,7 @@ vision.py - "Scan, then ask": the user shows a photo (webcam or upload) and asks
 The photo is sent to Groq and NOT stored anywhere on disk.
 Model: picked automatically from the Groq model list (override with vision_model.txt in the project folder).
 """
+from net import HTTP, JSONB
 import json
 import re
 import time
@@ -46,6 +47,14 @@ def register(app, provider, get_key, list_models, root):
         cache.update(model=m, t=time.time())
         return m
 
+    def _warm():                       # look the model up now, so the first "is photo available?" answers instantly
+        try:
+            vision_model()
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_warm, daemon=True).start()
+
     def call(image, system, user, max_tokens=700):
         p = provider()
         if not p or p["name"] != "groq":
@@ -58,7 +67,7 @@ def register(app, provider, get_key, list_models, root):
                                          {"type": "image_url", "image_url": {"url": image}}]}]
         body = {"model": model, "messages": msgs, "temperature": 0.2, "max_tokens": max_tokens}
         for attempt in (1, 2):
-            r = requests.post(f"{p['base']}/chat/completions", headers={"Authorization": f"Bearer {get_key()}"},
+            r = HTTP.post(f"{p['base']}/chat/completions", headers={"Authorization": f"Bearer {get_key()}"},
                               json=body, timeout=90)
             if r.status_code != 429 or attempt == 2:
                 break
@@ -93,8 +102,8 @@ def register(app, provider, get_key, list_models, root):
         return {"available": bool(m), "model": m or "", "reason": "" if m else "no vision model on this account"}
 
     @app.post("/api/vision/describe")
-    async def vision_describe(req: Request):
-        b = await req.json()
+    def vision_describe(req: Request, _body=JSONB):
+        b = (_body if _body is not None else {})
         bad = check(b.get("image"))
         if bad:
             return JSONResponse({"error": bad}, 400)
@@ -117,8 +126,8 @@ def register(app, provider, get_key, list_models, root):
                 "keywords": str(d.get("keywords", ""))[:300], "model": model}
 
     @app.post("/api/vision/chat")
-    async def vision_chat(req: Request):
-        b = await req.json()
+    def vision_chat(req: Request, _body=JSONB):
+        b = (_body if _body is not None else {})
         bad = check(b.get("image"))
         if bad:
             return JSONResponse({"error": bad}, 400)

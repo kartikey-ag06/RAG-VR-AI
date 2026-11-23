@@ -12,3 +12,13 @@ services:
         sync: false
       - key: XAI_API_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: MCP_TOKEN
+        sync: false
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_SECRET
+        sync: false

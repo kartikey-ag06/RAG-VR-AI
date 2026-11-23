@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VR_RAG - Admin</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --warn:#e0a63a; --bad:#e5596b; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 20px 60px; }
+  h1 { margin:0 0 4px; font-size:22px; } h1 span { color:var(--accent); } .sub { color:var(--muted); margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  input, select, button { border:1px solid var(--line); background:#0d1220; color:var(--text); padding:7px 10px; border-radius:8px; font:inherit; font-size:13px; }
+  button { background:#1a2540; cursor:pointer; } button.go { background:var(--accent); border-color:var(--accent); color:#06101f; font-weight:600; }
+  table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; } .muted { color:var(--muted); font-size:12px; }
+  .form { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px; } .form label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:3px; }
+  code, pre { background:#0b101c; border-radius:6px; padding:2px 6px; font-size:12px; } pre { padding:10px; overflow:auto; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .tokenbox { background:#14351f; border:1px solid var(--ok); border-radius:8px; padding:10px; margin-top:8px; display:none; word-break:break-all; }
+</style>
+<link rel="stylesheet" href="/theme/vr-theme.css">
+<script src="/theme/vr-shell.js" defer></script>
+</head>
+<body>
+<main>
+  <h1><span>Admin</span> · VR_RAG</h1>
+  <div class="sub">Storage, users and document permissions, connectors, and the MCP endpoint.</div>
+  <div class="card"><h2>Admin token</h2>
+    <div class="row"><input id="tok" type="password" placeholder="ADMIN_TOKEN or an admin user's token (not needed on this computer before users exist)" style="flex:1"><button id="save">Use</button></div>
+    <div id="status" class="muted" style="margin-top:8px">Loading...</div></div>
+
+  <div class="card"><h2>Users & document permissions (RBAC)</h2>
+    <div class="muted">Off while there are no users: everyone sees every document. After the first user exists, a document tagged with groups on the
+      <a href="/upload" style="color:var(--accent)">upload page</a> is visible only to users in those groups (admins see all). Create an <b>admin</b> first.</div>
+    <div class="row" style="margin-top:8px"><input id="uname" placeholder="Name"><input id="ugroups" placeholder="Groups (comma separated)"><select id="urole"><option value="user">user</option><option value="admin">admin</option></select><button class="go" id="uadd">Create user</button></div>
+    <div class="tokenbox" id="newtok"></div>
+    <div id="users" style="margin-top:8px"></div></div>
+
+  <div class="card"><h2>Connectors</h2>
+    <div class="muted">Send reports to a webhook / email / Jira / ServiceNow, or keep a folder (e.g. a synced SharePoint or Google Drive folder) indexed automatically.</div>
+    <div id="conns" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:12px"><select id="ctype"></select><input id="cname" placeholder="Name"></div>
+    <div class="form" id="cform"></div>
+    <div class="row" style="margin-top:8px"><button class="go" id="cadd">Save connector</button><span id="cmsg" class="muted"></span></div></div>
+
+  <div class="card"><h2>MCP endpoint (for other AI assistants)</h2>
+    <div class="muted">Tools: <code>list_documents</code>, <code>search_documents</code>, <code>get_page</code>, <code>ask_documents</code>.
+      Set the <code>MCP_TOKEN</code> environment variable on the server to allow access from other computers.</div>
+    <pre id="mcp"></pre></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+try { $('tok').value = localStorage.getItem('vr-admin-token') || ''; } catch {}
+const H = () => Object.assign({ 'Content-Type': 'application/json' }, $('tok').value ? { 'X-VR-Token': $('tok').value } : {});
+const api = async (u, o = {}) => { const r = await fetch(u, Object.assign({ cache: 'no-store', headers: H() }, o)); return [r.ok, await r.json().catch(() => ({}))]; };
+let types = {};
+
+async function load() {
+  const [, st] = await api('/api/admin/status');
+  $('status').innerHTML = `Storage: <b>${esc(st.storage)}</b> · embeddings: ${esc(st.embeddings)} · RBAC: ${st.rbac ? '<span class="ok">on</span>' : 'off'} ·
+    this browser is ${st.admin ? '<span class="ok">admin</span>' : '<span class="warn">not admin (enter a token)</span>'}${st.protected ? '' : ' · <span class="warn">server not protected: set ADMIN_TOKEN on internet servers</span>'}`;
+  $('users').innerHTML = st.users && st.users.length ? '<table><tr><th>Name</th><th>Role</th><th>Groups</th><th></th></tr>' + st.users.map((u) =>
+    `<tr><td>${esc(u.name)}</td><td>${esc(u.role)}</td><td>${esc((u.groups || []).join(', ') || '-')}</td><td><button data-deluser="${u.id}">Delete</button></td></tr>`).join('') + '</table>'
+    : `<div class="muted">${st.admin ? 'No users yet.' : 'Sign in with an admin token to see users.'}</div>`;
+  const [, c] = await api('/api/connectors');
+  types = c.types;
+  $('conns').innerHTML = c.connectors.length ? '<table><tr><th>Name</th><th>Type</th><th>Last result</th><th></th></tr>' + c.connectors.map((x) =>
+    `<tr><td>${esc(x.name)}</td><td>${esc(types[x.type] ? types[x.type].label : x.type)}</td><td class="muted">${esc(x.last_result || '-')}</td>
+     <td class="row"><button data-test="${x.id}">${x.type === 'folder' ? 'Sync now' : 'Send test'}</button><button data-delconn="${x.id}">Delete</button></td></tr>`).join('') + '</table>'
+    : '<div class="muted">No connectors yet.</div>';
+  if (!$('ctype').options.length) {
+    $('ctype').innerHTML = Object.entries(types).map(([k, v]) => `<option value="${k}" ${v.planned ? 'disabled' : ''}>${esc(v.label)}${v.planned ? ' - coming (needs credentials)' : ''}</option>`).join('');
+    form();
+  }
+  $('mcp').textContent = JSON.stringify({ mcpServers: { "vr-rag": { type: "http", url: location.origin + '/mcp', headers: st.mcp.token_required ? { Authorization: 'Bearer <MCP_TOKEN>' } : undefined } } }, null, 2);
+}
+function form() {
+  const t = types[$('ctype').value];
+  $('cform').innerHTML = t.fields.map((f) => `<label>${esc(f.label)}<input data-f="${f.name}" ${f.secret ? 'type="password"' : ''}></label>`).join('');
+}
+$('ctype').onchange = form;
+$('save').onclick = () => { try { localStorage.setItem('vr-admin-token', $('tok').value); } catch {} load(); };
+$('uadd').onclick = async () => {
+  const [ok, r] = await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ name: $('uname').value || 'user', groups: $('ugroups').value, role: $('urole').value }) });
+  if (!ok) return alert(r.error || 'failed');
+  $('newtok').style.display = 'block';
+  $('newtok').innerHTML = `Token for <b>${esc(r.user.name)}</b> (copy it now, it is not shown again):<br><code>${esc(r.token)}</code>`;
+  load();
+};
+$('cadd').onclick = async () => {
+  const settings = {}; document.querySelectorAll('#cform [data-f]').forEach((i) => { settings[i.dataset.f] = i.value; });
+  const [ok, r] = await api('/api/connectors', { method: 'POST', body: JSON.stringify({ type: $('ctype').value, name: $('cname').value, settings }) });
+  $('cmsg').textContent = ok ? 'Saved.' : (r.error || 'failed'); load();
+};
+document.addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-deluser],[data-delconn],[data-test]');
+  if (!t) return;
+  if (t.dataset.deluser && confirm('Delete this user?')) await api('/api/admin/users/' + t.dataset.deluser, { method: 'DELETE' });
+  if (t.dataset.delconn && confirm('Delete this connector?')) await api('/api/connectors/' + t.dataset.delconn, { method: 'DELETE' });
+  if (t.dataset.test) { t.disabled = true; const [ok, r] = await api(`/api/connectors/${t.dataset.test}/test`, { method: 'POST' }); t.disabled = false; alert(ok ? 'OK: ' + r.result : 'Failed: ' + r.error); }
+  load();
+});
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "TURN_URLS": "turn:203.0.113.10:3478?transport=udp,turn:203.0.113.10:3478?transport=tcp",
+  "TURN_SECRET": "change-me-to-a-long-random-string",
+  "TURN_FORCE": ""
+}
