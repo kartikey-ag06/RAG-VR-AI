@@ -54,6 +54,17 @@ class Auth:
             return False
         return user.get("role") == "admin" or bool(set(user.get("groups", [])) & set(doc_groups))
 
+    def is_local(self, req):
+        if not req or not req.client:
+            return False
+        host = req.client.host or ""
+        xff = req.headers.get("x-forwarded-for")
+        if xff:
+            client_ip = xff.split(",")[0].strip()
+            if client_ip not in LOCAL:
+                return False
+        return host in LOCAL
+
     def is_admin(self, req):
         tok = self.token_of(req)
         admin_env = os.environ.get("ADMIN_TOKEN", "")
@@ -62,13 +73,22 @@ class Auth:
         u = self.user_of(req)
         if u and u.get("role") == "admin":
             return True
-        # no users and no admin key configured: keep the old open behaviour, but only from this computer
-        host = req.client.host if req.client else ""
-        return not self.enabled and not admin_env and host in LOCAL
+        # no users and no admin key configured: open ONLY when strictly local
+        return not self.enabled and not admin_env and self.is_local(req)
 
-    def admin_required(self, req):
-        """True when this server is protected (users or ADMIN_TOKEN exist) - upload/delete then need an admin."""
-        return self.enabled or bool(os.environ.get("ADMIN_TOKEN"))
+    def admin_required(self, req=None):
+        """True when this server is protected (users/ADMIN_TOKEN exist, running on Render, or remote request)."""
+        if self.enabled or bool(os.environ.get("ADMIN_TOKEN")) or bool(os.environ.get("RENDER")):
+            return True
+        if req is not None and not self.is_local(req):
+            return True
+        return False
+
+    def require_user(self, req):
+        """True if the caller is an authenticated user or admin, or if server is running unprotected locally."""
+        if not self.admin_required(req):
+            return True
+        return bool(self.user_of(req) or self.is_admin(req))
 
     def create_user(self, name, groups, role="user"):
         token = secrets.token_urlsafe(18)

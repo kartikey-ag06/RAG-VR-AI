@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from net import HTTP, JSONB
+from net import HTTP, JSONB, is_safe_url
 
 try:
     from zoneinfo import ZoneInfo
@@ -191,6 +191,8 @@ class Calendars:
         url = src["url"].strip()
         if url.startswith("webcal://"):
             url = "https://" + url[len("webcal://"):]
+        if not is_safe_url(url, allow_http=True):
+            raise ValueError("URL points to a restricted internal or private address")
         r = HTTP.get(url, timeout=20, headers={"User-Agent": "VR_RAG calendar"})
         r.raise_for_status()
         r.encoding = r.encoding or "utf-8"
@@ -250,6 +252,9 @@ def register(app, kv, auth):
         url = str(b.get("url", "")).strip()
         if not re.match(r"^(https?|webcal)://", url) or len(url) > 2000:
             return JSONResponse({"error": "paste the calendar's ICS / iCal link (https://… or webcal://…)"}, 400)
+        test_url = "https://" + url[len("webcal://"):] if url.startswith("webcal://") else url
+        if not is_safe_url(test_url, allow_http=True):
+            return JSONResponse({"error": "forbidden calendar URL (private/internal addresses not allowed)"}, 400)
         src = {"id": secrets.token_hex(4), "name": str(b.get("name") or "Calendar")[:60], "url": url,
                "color": str(b.get("color") or "#4fb3ff")[:9], "added": time.time()}
         try:
@@ -269,7 +274,10 @@ def register(app, kv, auth):
         return {"deleted": sid}
 
     @app.post("/api/calendar/sources/{sid}/test")
-    def test_source(sid: str):
+    def test_source(sid: str, req: Request):
+        d = deny(req)
+        if d:
+            return d
         src = kv.kv_get("calsrc", sid)
         if not src:
             return JSONResponse({"error": "not found"}, 404)

@@ -13,6 +13,7 @@ import io
 import json
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -119,24 +120,34 @@ def register(app, kv, llm, search, store, connectors, root, auth):
         kv.kv_put("session", s["id"], s)
         return s
 
+    _SESSION_LOCKS = {}
+    _SLOCK_MUTEX = threading.Lock()
+
+    def _get_session_lock(sid: str):
+        with _SLOCK_MUTEX:
+            if sid not in _SESSION_LOCKS:
+                _SESSION_LOCKS[sid] = threading.Lock()
+            return _SESSION_LOCKS[sid]
+
     @app.post("/api/sessions/{sid}/log")
     def session_log(sid: str, req: Request, _body=JSONB):
-        s = kv.kv_get("session", sid)
-        if not can_read(s, req):
-            return JSONResponse({"error": "session not found"}, 404)
-        b = (_body if _body is not None else {})
-        typ = str(b.get("type", "note"))[:20]
-        data = b.get("data") if isinstance(b.get("data"), dict) else {"text": str(b.get("data", ""))}
-        data = json.loads(json.dumps(data)[:4000]) if len(json.dumps(data)) <= 4000 else {"text": json.dumps(data)[:3900]}
-        s["log"].append({"t": now_iso(), "type": typ, "data": data})
-        s["log"] = s["log"][-300:]
-        if typ == "machine" and data.get("machine_id"):
-            s["machine"] = str(data["machine_id"])[:80]
-        if typ == "workflow":
-            s["workflow"] = data
-        s["updated"] = now_iso()
-        kv.kv_put("session", sid, s)
-        return {"ok": True, "entries": len(s["log"])}
+        with _get_session_lock(sid):
+            s = kv.kv_get("session", sid)
+            if not can_read(s, req):
+                return JSONResponse({"error": "session not found"}, 404)
+            b = (_body if _body is not None else {})
+            typ = str(b.get("type", "note"))[:20]
+            data = b.get("data") if isinstance(b.get("data"), dict) else {"text": str(b.get("data", ""))}
+            data = json.loads(json.dumps(data)[:4000]) if len(json.dumps(data)) <= 4000 else {"text": json.dumps(data)[:3900]}
+            s["log"].append({"t": now_iso(), "type": typ, "data": data})
+            s["log"] = s["log"][-300:]
+            if typ == "machine" and data.get("machine_id"):
+                s["machine"] = str(data["machine_id"])[:80]
+            if typ == "workflow":
+                s["workflow"] = data
+            s["updated"] = now_iso()
+            kv.kv_put("session", sid, s)
+            return {"ok": True, "entries": len(s["log"])}
 
     @app.get("/api/sessions")
     def sessions(req: Request):

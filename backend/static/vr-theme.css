@@ -148,3 +148,10 @@ a { color: #7cc4ff; }
 .vr-toast { background: rgba(14, 20, 36, .92); border: 1px solid var(--line2); border-left: 3px solid var(--accent); color: var(--text);
   padding: 10px 14px; border-radius: 12px; font-size: 13.5px; box-shadow: var(--shadow); animation: vr-in .25s ease both; max-width: 360px; }
 .vr-toast.ok { border-left-color: var(--ok); } .vr-toast.bad { border-left-color: var(--bad); }
+
+/* Responsive tables & layout */
+.table-responsive { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-bottom: 16px; }
+@media (max-width: 768px) {
+  table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .grid { grid-template-columns: 1fr !important; }
+}

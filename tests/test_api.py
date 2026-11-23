@@ -83,6 +83,50 @@ def test_api_suite():
     check("MCP ping", "POST", "/mcp", 200, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
     check("MCP list tools", "POST", "/mcp", 200, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 
+    # M1 & H4: Non-dict / Malformed JSON Body Protection
+    check("Non-dict body (array) to reminders", "POST", "/api/reminders", 400, json=[1, 2, 3])
+    check("Non-dict body (array) to search", "POST", "/api/search", 400, json=["invalid"])
+    check("Non-dict body (string) to machines resolve", "POST", "/api/machines/resolve", 400, json="raw string")
+
+    # Search k parameter clamping
+    r_clamp = check("Search k clamp", "POST", "/api/search", 200, json={"query": "order", "k": 99999})
+    if r_clamp and r_clamp.status_code == 200:
+        hits = r_clamp.json().get("hits", [])
+        if len(hits) > 20:
+            errors.append(f"Search k clamp failed: expected <= 20 hits, got {len(hits)}")
+
+    # H5: SSRF Protection
+    check("SSRF localhost block", "POST", "/api/calendar/sources", 400,
+          json={"name": "Evil", "url": "http://127.0.0.1:8765/api/admin/status"})
+    check("SSRF cloud metadata block", "POST", "/api/calendar/sources", 400,
+          json={"name": "Metadata", "url": "http://169.254.169.254/latest/meta-data/"})
+
+    # C2: Fail-Closed Auth on Remote Requests
+    check("Remote request to files delete without auth", "DELETE", "/api/files/000000000000", 403,
+          headers={"X-Forwarded-For": "203.0.113.195"})
+    check("Remote request to files upload without auth", "POST", "/api/files", 403,
+          headers={"X-Forwarded-For": "203.0.113.195"}, files=[("files", ("test.txt", b"content", "text/plain"))])
+    check("Remote request to grok without auth", "POST", "/api/grok", 401,
+          headers={"X-Forwarded-For": "203.0.113.195"}, json={"messages": [{"role": "user", "content": "hi"}]})
+
+    # M2: Concurrency & Lost Updates in Meeting Segments
+    import concurrent.futures
+    rm = check("Create Meeting", "POST", "/api/meetings", 200, json={"title": "Concurrency Test"})
+    if rm and rm.status_code == 200:
+        mid = rm.json().get("id")
+        def post_seg(i):
+            return client.post(f"/api/meetings/{mid}/segment", json={"text": f"Segment {i}", "t": float(i)})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futs = [executor.submit(post_seg, i) for i in range(20)]
+            concurrent.futures.wait(futs)
+        # Verify all 20 segments are intact
+        rm_check = client.get(f"/api/meetings/{mid}")
+        if rm_check.status_code == 200:
+            segs = rm_check.json().get("segments", [])
+            if len(segs) != 20:
+                errors.append(f"Meeting concurrency race condition: expected 20 segments, got {len(segs)}")
+        client.delete(f"/api/meetings/{mid}")
+
     assert len(errors) == 0, f"Encountered {len(errors)} errors:\n" + "\n".join(errors)
     print("All API tests passed cleanly with 0 errors!")
 

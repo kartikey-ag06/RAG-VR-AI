@@ -8,6 +8,7 @@ turn.json
 _*.zip
 glasses_app/node_modules/
 glasses_app/dist/_test/
+glasses_app/dist/rag/
 __pycache__/
 *.pyc
 
