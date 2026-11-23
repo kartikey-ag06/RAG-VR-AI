@@ -21,3 +21,4 @@ _*update*.tgz
 _*.tgz
 
 _*.md5
+vite.config.js.timestamp-*
