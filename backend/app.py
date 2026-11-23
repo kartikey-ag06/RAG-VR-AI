@@ -541,13 +541,14 @@ def grok_stream(_body=JSONB):
     r.encoding = "utf-8"            # SSE has no charset: without this, ’ “ ₹ and Hindi text arrive garbled
 
     def gen():
-        out = []
+        out, complete = [], False
         try:
             for line in r.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    complete = True
                     break
                 try:
                     piece = (json.loads(data)["choices"][0].get("delta") or {}).get("content") or ""
@@ -556,9 +557,12 @@ def grok_stream(_body=JSONB):
                 if piece:
                     out.append(piece)
                     yield piece
+            else:
+                complete = True
         finally:
-            r.close()
-            _remember(key, "".join(out))
+            r.close()                   # also runs when the user presses Stop: Groq stops sending at once
+            if complete:                # never cache a half answer (stopped by the user)
+                _remember(key, "".join(out))
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
