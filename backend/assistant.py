@@ -15,6 +15,7 @@ from net import HTTP, JSONB
 import json
 import re
 import secrets
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -83,12 +84,38 @@ def _id():
     return secrets.token_hex(5)
 
 
-def register(app, kv, llm, cals=None):
+def register(app, kv, llm, cals=None, auth=None):
     tcache = OrderedDict()
+    _RLOCKS = {}
+    _RLOCK_MUTEX = threading.Lock()
+
+    def _get_rlock(rid: str):
+        with _RLOCK_MUTEX:
+            if rid not in _RLOCKS:
+                _RLOCKS[rid] = threading.Lock()
+            return _RLOCKS[rid]
+
+    def owner(req):
+        if not auth:
+            return ""
+        u = auth.user_of(req)
+        return u["id"] if u else ""
+
+    def mine(item, req):
+        if not auth or not auth.enabled:
+            return True
+        if auth.is_admin(req):
+            return True
+        u = auth.user_of(req)
+        if not u:
+            return False
+        return item.get("owner") == u["id"] or not item.get("owner")
 
     # ---------- translation
     @app.post("/api/translate")
     def translate(req: Request, _body=JSONB):
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
         b = (_body if _body is not None else {})
         text, target = str(b.get("text", "")).strip()[:3000], str(b.get("target", "English")).strip()[:40]
         if not text:
@@ -112,12 +139,16 @@ def register(app, kv, llm, cals=None):
         return kv.kv_list(kind)
 
     @app.get("/api/reminders")
-    def reminders(all: int = 0):
-        rs = [r for r in items("reminder") if all or not r.get("done")]
+    def reminders(req: Request, all: int = 0):
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
+        rs = [r for r in items("reminder") if mine(r, req) and (all or not r.get("done"))]
         return {"reminders": sorted(rs, key=lambda r: (r.get("due") or "9999", r.get("created", 0)))}
 
     @app.post("/api/reminders")
     def reminder_add(req: Request, _body=JSONB):
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
         b = (_body if _body is not None else {})
         text = clean_reminder(str(b.get("text", "")).strip()[:300])
         due = b.get("due")
@@ -126,38 +157,44 @@ def register(app, kv, llm, cals=None):
                 due = datetime.fromisoformat(str(due).replace("Z", "+00:00")).isoformat(timespec="minutes")
             except ValueError:
                 due = None
-        r = {"id": _id(), "text": text, "due": due or None, "done": False, "created": time.time(), "notified": False}
+        r = {"id": _id(), "text": text, "due": due or None, "done": False, "created": time.time(), "notified": False, "owner": owner(req)}
         kv.kv_put("reminder", r["id"], r)
         return r
 
     @app.patch("/api/reminders/{rid}")
     def reminder_patch(rid: str, req: Request, _body=JSONB):
-        r = kv.kv_get("reminder", rid)
-        if not r:
-            return JSONResponse({"error": "not found"}, 404)
-        b = (_body if _body is not None else {})
-        for k in ("done", "notified"):
-            if k in b:
-                r[k] = bool(b[k])
-        if b.get("text"):
-            r["text"] = clean_reminder(str(b["text"])[:300])
-        if "due" in b:
-            try:
-                r["due"] = datetime.fromisoformat(str(b["due"]).replace("Z", "+00:00")).isoformat(timespec="minutes") if b["due"] else None
-                r["notified"] = False
-            except ValueError:
-                pass
-        kv.kv_put("reminder", rid, r)
-        return r
+        with _get_rlock(rid):
+            r = kv.kv_get("reminder", rid)
+            if not r or not mine(r, req):
+                return JSONResponse({"error": "not found"}, 404)
+            b = (_body if _body is not None else {})
+            for k in ("done", "notified"):
+                if k in b:
+                    r[k] = bool(b[k])
+            if b.get("text"):
+                r["text"] = clean_reminder(str(b["text"])[:300])
+            if "due" in b:
+                try:
+                    r["due"] = datetime.fromisoformat(str(b["due"]).replace("Z", "+00:00")).isoformat(timespec="minutes") if b["due"] else None
+                    r["notified"] = False
+                except ValueError:
+                    pass
+            kv.kv_put("reminder", rid, r)
+            return r
 
     @app.delete("/api/reminders/{rid}")
-    def reminder_delete(rid: str):
+    def reminder_delete(rid: str, req: Request):
+        r = kv.kv_get("reminder", rid)
+        if not r or not mine(r, req):
+            return JSONResponse({"error": "not found"}, 404)
         kv.kv_delete("reminder", rid)
         return {"deleted": rid}
 
     @app.get("/api/calendar")
-    def calendar(day: str = "today", tz: int = 0):
+    def calendar(req: Request, day: str = "today", tz: int = 0):
         """tz = minutes east of UTC (India = 330). Entries = reminders with a time + events of linked calendars."""
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
         now = datetime.now(timezone(timedelta(minutes=tz)))
         if day == "tomorrow":
             d = (now + timedelta(days=1)).date()
@@ -167,6 +204,8 @@ def register(app, kv, llm, cals=None):
             d = now.date()
         out = []
         for r in items("reminder"):
+            if not mine(r, req):
+                continue
             if r.get("due"):
                 try:
                     dt = datetime.fromisoformat(r["due"]).astimezone(now.tzinfo)
@@ -183,21 +222,28 @@ def register(app, kv, llm, cals=None):
                 "linked": len(cals.sources()) if cals is not None else 0}
 
     @app.get("/api/notes")
-    def notes():
-        return {"notes": items("note")}
+    def notes(req: Request):
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
+        return {"notes": [n for n in items("note") if mine(n, req)]}
 
     @app.post("/api/notes")
     def note_add(req: Request, _body=JSONB):
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
         b = (_body if _body is not None else {})
         text = str(b.get("text", "")).strip()[:2000]
         if not text:
             return JSONResponse({"error": "empty note"}, 400)
-        n = {"id": _id(), "text": text, "created": time.time()}
+        n = {"id": _id(), "text": text, "created": time.time(), "owner": owner(req)}
         kv.kv_put("note", n["id"], n)
         return n
 
     @app.delete("/api/notes/{nid}")
-    def note_delete(nid: str):
+    def note_delete(nid: str, req: Request):
+        n = kv.kv_get("note", nid)
+        if not n or not mine(n, req):
+            return JSONResponse({"error": "not found"}, 404)
         kv.kv_delete("note", nid)
         return {"deleted": nid}
 
@@ -231,6 +277,8 @@ def register(app, kv, llm, cals=None):
     # ---------- voice command router
     @app.post("/api/assistant/intent")
     def intent(req: Request, _body=JSONB):
+        if auth and auth.admin_required(req) and not auth.require_user(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
         b = (_body if _body is not None else {})
         text = str(b.get("text", "")).strip()[:500]
         now = str(b.get("now", ""))[:40] or datetime.now(timezone.utc).isoformat(timespec="minutes")

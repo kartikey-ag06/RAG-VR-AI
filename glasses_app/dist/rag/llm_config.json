@@ -1,9 +1,0 @@
-{
-  "provider": "auto",
-  "_providers": "auto (Grok via server if grok_api_key.txt exists, else local Ollama, else offline) | grok | none | ollama | anthropic | openai",
-  "apiKey": "",
-  "model": "",
-  "_models": "ollama: any pulled model e.g. llama3.2 | anthropic: claude-sonnet-5-5 | openai: gpt-4o-mini",
-  "endpoint": "",
-  "_warning": "This file is readable by the browser. Only put an API key here for local testing, never deploy it."
-}

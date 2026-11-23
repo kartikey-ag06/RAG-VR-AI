@@ -28,7 +28,10 @@
 <body>
 <main>
   <h1><span>Remote expert</span> console</h1>
-  <div class="sub">A worker wearing the glasses can escalate a problem. You see their view, hear them, read what the AI already told them, and guide them by voice and chat.</div>
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:16px;">
+    <div class="sub" style="margin-bottom:0">A worker wearing the glasses can escalate a problem. You see their view, hear them, read what the AI already told them, and guide them by voice and chat.</div>
+    <label style="font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px;">Access token: <input id="token" type="password" placeholder="enter if protected" style="padding:4px 8px; font-size:12px; width:180px;"></label>
+  </div>
   <div class="grid">
     <div>
       <div class="card"><h2>Worker's view</h2><video id="remote" autoplay playsinline></video><div id="state">Not connected. Pick a call on the right.</div>
@@ -45,29 +48,43 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const tok = () => ($('token') ? $('token').value.trim() : '');
+try { $('token').value = localStorage.getItem('vr-admin-token') || ''; } catch {}
+if ($('token')) $('token').onchange = () => { try { localStorage.setItem('vr-admin-token', tok()); } catch {}; listRooms(); };
+const hdr = () => (tok() ? { 'X-VR-Token': tok() } : {});
+
 let ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all', turn: false };
 // STUN + TURN relay from the server (TURN = calls also work through office / mobile networks)
-fetch('/api/expert/ice').then((r) => r.json()).then((j) => { if (j.iceServers) ICE = j; }).catch(() => {});
+fetch('/api/expert/ice', { headers: hdr() }).then((r) => r.json()).then((j) => { if (j.iceServers) ICE = j; }).catch(() => {});
 let room = null, pc = null, since = 0, timer = null, mic = null;
 
 async function send(type, data) {
-  await fetch(`/api/expert/${room}/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'expert', type, data }) });
+  await fetch(`/api/expert/${room}/send`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...hdr() }, body: JSON.stringify({ from: 'expert', type, data }) });
 }
 function chat(who, text) { const d = document.createElement('div'); d.className = who === 'worker' ? 'w' : 'e'; d.textContent = (who === 'worker' ? 'Worker: ' : 'You: ') + text; $('chat').appendChild(d); $('chat').scrollTop = 1e9; }
 function showCtx(c) { $('ctx').textContent = Object.entries(c || {}).map(([k, v]) => `${k.toUpperCase()}: ${v}`).join('\n\n') || '-'; }
 
 async function listRooms() {
-  const r = await (await fetch('/api/expert/rooms', { cache: 'no-store' })).json();
-  $('rooms').innerHTML = r.rooms.length ? r.rooms.map((x) => `<div class="room"><div><b>${esc((x.context.question || 'Call').slice(0, 70))}</b>
-      <div class="muted">${new Date(x.created * 1000).toLocaleTimeString()} · ${x.status}${x.context.machine ? ' · ' + esc(x.context.machine) : ''}</div></div>
-      <button class="go" data-join="${x.id}" ${room === x.id ? 'disabled' : ''}>${room === x.id ? 'Joined' : 'Join'}</button></div>`).join('')
-    : '<div class="muted">No calls yet.</div>';
+  try {
+    const res = await fetch('/api/expert/rooms', { cache: 'no-store', headers: hdr() });
+    if (res.status === 401 || res.status === 403) {
+      $('rooms').innerHTML = '<div class="muted" style="color:var(--bad)">Authentication required. Enter your token above.</div>';
+      return;
+    }
+    const r = await res.json();
+    $('rooms').innerHTML = (r.rooms && r.rooms.length) ? r.rooms.map((x) => `<div class="room"><div><b>${esc((x.context.question || 'Call').slice(0, 70))}</b>
+        <div class="muted">${new Date(x.created * 1000).toLocaleTimeString()} · ${x.status}${x.context.machine ? ' · ' + esc(x.context.machine) : ''}</div></div>
+        <button class="go" data-join="${x.id}" ${room === x.id ? 'disabled' : ''}>${room === x.id ? 'Joined' : 'Join'}</button></div>`).join('')
+      : '<div class="muted">No calls yet.</div>';
+  } catch (e) {
+    $('rooms').innerHTML = '<div class="muted">Could not load calls.</div>';
+  }
 }
 
 async function join(id) {
   if (pc) hangup(false);
   room = id; since = 0; $('chat').innerHTML = '';
-  const info = await (await fetch('/api/expert/' + id)).json(); showCtx(info.context);
+  const info = await (await fetch('/api/expert/' + id, { headers: hdr() })).json(); showCtx(info.context);
   pc = new RTCPeerConnection({ iceServers: ICE.iceServers, iceTransportPolicy: ICE.iceTransportPolicy });
   try { mic = await navigator.mediaDevices.getUserMedia({ audio: true }); mic.getTracks().forEach((t) => pc.addTrack(t, mic)); }
   catch { $('state').textContent = 'Microphone blocked - the worker will not hear you (chat still works).'; }
@@ -82,7 +99,7 @@ async function join(id) {
 
 async function poll() {
   if (!room) return;
-  const r = await (await fetch(`/api/expert/${room}/poll?me=expert&since=${since}`, { cache: 'no-store' })).json().catch(() => null);
+  const r = await (await fetch(`/api/expert/${room}/poll?me=expert&since=${since}`, { cache: 'no-store', headers: hdr() })).json().catch(() => null);
   if (!r) return;
   for (const m of r.msgs) {
     since = Math.max(since, m.n);
@@ -98,7 +115,7 @@ async function poll() {
 }
 
 function hangup(notify = true) {
-  if (notify && room) fetch(`/api/expert/${room}/end`, { method: 'POST' });
+  if (notify && room) fetch(`/api/expert/${room}/end`, { method: 'POST', headers: hdr() });
   clearInterval(timer);
   if (pc) pc.close(); pc = null;
   if (mic) mic.getTracks().forEach((t) => t.stop()); mic = null;

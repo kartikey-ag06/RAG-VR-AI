@@ -60,8 +60,8 @@ app = FastAPI(title="VR_RAG backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$|^https://.*\.onrender\.com$",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -214,7 +214,8 @@ def run_search(query, k=8, machine="", user=None):
 @app.post("/api/search")
 def search(req: Request, _body=JSONB):
     body = (_body if _body is not None else {})
-    return run_search(str(body.get("query", "")).strip(), int(body.get("k", 8)),
+    k = max(1, min(20, int(body.get("k", 8))))
+    return run_search(str(body.get("query", "")).strip(), k,
                       str(body.get("machine", "") or "")[:80], AUTH.user_of(req))
 
 
@@ -356,7 +357,7 @@ def rag_figure(pos: int, file: str, req: Request):
     p = STORE.figure_image(uids[pos], file) if 0 <= pos < len(uids) and _doc_visible(pos, req) else None
     if not p:
         return JSONResponse({"error": "figure not found"}, 404)
-    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/rag/pages/{name}")
@@ -365,7 +366,7 @@ def rag_page(name: str, req: Request):
     p = STORE.page_image(int(m.group(1)), int(m.group(2))) if m and _doc_visible(int(m.group(1)), req) else None
     if not p:
         return JSONResponse({"error": "page not found"}, 404)
-    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 # ---------------------------------------------------------------- LLM provider (Groq / Grok)
@@ -496,7 +497,9 @@ def _remember(key, text):
 
 
 @app.post("/api/grok")
-def grok(_body=JSONB):
+def grok(req: Request, _body=JSONB):
+    if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
+        return JSONResponse({"error": "unauthorized"}, 401)
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key. Put a Groq (gsk_...) or xAI (xai-...) key in grok_api_key.txt"}, 400)
@@ -520,8 +523,10 @@ def grok(_body=JSONB):
 
 
 @app.post("/api/grok/stream")
-def grok_stream(_body=JSONB):
+def grok_stream(req: Request, _body=JSONB):
     """Same as /api/grok but streams the answer as plain text while it is written (first words in ~0.5 s)."""
+    if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
+        return JSONResponse({"error": "unauthorized"}, 401)
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key in grok_api_key.txt"}, 400)
@@ -570,6 +575,8 @@ def grok_stream(_body=JSONB):
 
 @app.post("/api/stt")
 async def stt(req: Request):
+    if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
+        return JSONResponse({"error": "unauthorized"}, 401)
     p = provider()
     if not p or p["name"] != "groq":
         return JSONResponse({"error": "Voice transcription needs a Groq key (gsk_...)"}, 400)
@@ -625,7 +632,7 @@ def _register(name, fn):
 
 import assistant, connectors, workflows, expert, mcp_server, calsync, navigation, meetings
 CALS = _register("calendar sync", lambda: calsync.register(app, KV, AUTH))
-_register("assistant", lambda: assistant.register(app, KV, llm_complete, CALS))
+_register("assistant", lambda: assistant.register(app, KV, llm_complete, CALS, AUTH))
 CONNECTORS = _register("connectors", lambda: connectors.register(app, KV, AUTH, STORE)) or {"send": None, "get": lambda c: None}
 _register("workflows", lambda: workflows.register(app, KV, llm_complete, run_search, STORE, CONNECTORS, ROOT, AUTH))
 _register("expert", lambda: expert.register(app, ROOT, AUTH))

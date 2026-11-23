@@ -12,7 +12,7 @@ INPUT connectors (documents are re-indexed automatically when they change):
 
 Secrets are never sent back to the browser (shown as "••••").
 """
-from net import HTTP, JSONB
+from net import HTTP, JSONB, is_safe_url
 import hashlib
 import json
 import secrets
@@ -83,10 +83,13 @@ def send(c, report, pdf_bytes=None, timeout=20):
     """report: {title, summary, kind, fields...}. Returns a short text describing where it went."""
     s, t = c["settings"], c["type"]
     if t == "webhook":
+        url = str(s.get("url", "")).strip()
+        if not is_safe_url(url, allow_http=True):
+            raise ValueError("Forbidden webhook URL (private/internal addresses not allowed)")
         h = {"Content-Type": "application/json"}
         if s.get("header_name") and s.get("header_value"):
             h[s["header_name"]] = s["header_value"]
-        r = HTTP.post(s["url"], json=report, headers=h, timeout=timeout)
+        r = HTTP.post(url, json=report, headers=h, timeout=timeout)
         r.raise_for_status()
         return f"webhook HTTP {r.status_code}"
     if t == "email":
@@ -212,6 +215,10 @@ def register(app, kv, auth, store):
             if sec and v == "••••" and old:
                 v = old["settings"].get(f, "")              # unchanged secret
             settings[f] = v
+        if t == "webhook":
+            url = str(settings.get("url", "")).strip()
+            if not is_safe_url(url, allow_http=True):
+                return JSONResponse({"error": "invalid or forbidden webhook URL (internal/private addresses not allowed)"}, 400)
         c = dict(old or {}, id=(old or {}).get("id") or secrets.token_hex(5), type=t,
                  name=str(b.get("name") or TYPES[t]["label"])[:80], enabled=bool(b.get("enabled", True)), settings=settings)
         kv.kv_put("connector", c["id"], c)

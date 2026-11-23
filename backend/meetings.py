@@ -17,6 +17,7 @@ import io
 import json
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -84,18 +85,28 @@ def register(app, kv, llm, search, auth):
         kv.kv_put("meeting", m["id"], m)
         return m
 
+    _MEETING_LOCKS = {}
+    _MLOCK_MUTEX = threading.Lock()
+
+    def _get_meeting_lock(mid: str):
+        with _MLOCK_MUTEX:
+            if mid not in _MEETING_LOCKS:
+                _MEETING_LOCKS[mid] = threading.Lock()
+            return _MEETING_LOCKS[mid]
+
     @app.post("/api/meetings/{mid}/segment")
     def segment(mid: str, req: Request, _body=JSONB):
-        m = kv.kv_get("meeting", mid)
-        if not mine(m, req):
-            return JSONResponse({"error": "meeting not found"}, 404)
-        text = re.sub(r"\s+", " ", str((_body or {}).get("text", ""))).strip()[:4000]
-        if text and len(m["segments"]) < 3000:
-            t = float((_body or {}).get("t") or (time.time() - m["t0"]))
-            m["segments"].append({"t": round(t, 1), "clock": f"{int(t // 60):02d}:{int(t % 60):02d}", "text": text})
-            m["seconds"] = max(m.get("seconds", 0), t)
-            kv.kv_put("meeting", mid, m)
-        return {"ok": True, "segments": len(m["segments"])}
+        with _get_meeting_lock(mid):
+            m = kv.kv_get("meeting", mid)
+            if not mine(m, req):
+                return JSONResponse({"error": "meeting not found"}, 404)
+            text = re.sub(r"\s+", " ", str((_body or {}).get("text", ""))).strip()[:4000]
+            if text and len(m["segments"]) < 3000:
+                t = float((_body or {}).get("t") or (time.time() - m["t0"]))
+                m["segments"].append({"t": round(t, 1), "clock": f"{int(t // 60):02d}:{int(t % 60):02d}", "text": text})
+                m["seconds"] = max(m.get("seconds", 0), t)
+                kv.kv_put("meeting", mid, m)
+            return {"ok": True, "segments": len(m["segments"])}
 
     @app.post("/api/meetings/{mid}/stop")
     def stop(mid: str, req: Request):
