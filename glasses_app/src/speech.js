@@ -37,6 +37,8 @@ import { transcribe } from './rag.js';
 import { privacy } from './privacy.js';
 
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+// "stop" / "cancel" / Hindi "bas", "ruko" - same words the app uses to stop an answer
+const STOP_WORD = /^(please\s+)?(stop|stop it|stop now|stop talking|cancel|enough|that'?s enough|be quiet|quiet|silence|shut up|bas|ruko|ruk jao|band karo)[.!]?$/i;
 const canFallback = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
 
 export function speechSupported() { return !!Rec || canFallback; }
@@ -147,6 +149,22 @@ function whisperListener({ onCommand, onCaption, onState, onHeard }) {
 function nativeListener({ onCommand, onCaption, onState, onHeard, onFatal }) {
   let rec = null, lang = 'en-IN', wantWake = false, wantCaptions = false, armedUntil = 0, running = false, paused = false;
   let startedAt = 0, quickEnds = 0, heardAny = false;
+  // End-of-question detection: Chrome can take many seconds to "finalise" a sentence when there is
+  // background noise. If the words stop changing for END_MS after the wake word, we treat the question as done.
+  const END_MS = 1200;
+  let pending = '', endTimer = null;
+  const clearPending = () => { clearTimeout(endTimer); endTimer = null; pending = ''; };
+  function commit() {
+    const q = pending.trim(); clearPending();
+    if (q.length < 3) return;
+    armedUntil = 0;
+    restart(true);                     // drop Chrome's half-finished sentence so it is not sent a second time
+    onCommand(q);
+  }
+  function waitForEnd(text) {
+    if (text === pending) return;
+    pending = text; clearTimeout(endTimer); endTimer = setTimeout(commit, STOP_WORD.test(text) ? 250 : END_MS);   // "stop" acts at once
+  }
 
   function start() {
     if (!Rec || running || paused || !(wantWake || wantCaptions)) return;
@@ -154,7 +172,14 @@ function nativeListener({ onCommand, onCaption, onState, onHeard, onFatal }) {
     rec.lang = lang; rec.continuous = true; rec.interimResults = true;
     rec.onresult = (e) => {
       let interim = '';
-      if (appIsSpeaking() && !wantCaptions) return;              // our own spoken answer, not the user
+      if (appIsSpeaking() && !wantCaptions) {                   // our own spoken answer, not the user...
+        if (!wantWake) return;                                   // ...except "Hey Glasses, stop"
+        let all = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) all += e.results[i][0].transcript + ' ';
+        const w = findWake(all.trim());
+        if (w && STOP_WORD.test(w.rest)) { clearPending(); armedUntil = 0; restart(true); onCommand('stop'); }
+        return;
+      }
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i], text = r[0].transcript.trim();
         heardAny = true;
@@ -162,6 +187,7 @@ function nativeListener({ onCommand, onCaption, onState, onHeard, onFatal }) {
         if (onHeard) onHeard(text, 'chrome');
         if (wantCaptions) onCaption(text, true);
         if (!wantWake || !text) continue;
+        clearPending();                                          // Chrome finished the sentence itself
         const w = findWake(text);
         if (w) {
           const rest = w.rest;
@@ -171,9 +197,11 @@ function nativeListener({ onCommand, onCaption, onState, onHeard, onFatal }) {
       }
       if (interim && wantCaptions) onCaption(interim.trim(), false);
       // react while you are still talking: "Hey Glasses" shows "Listening..." at once, the question follows in the final text
-      if (interim && wantWake && Date.now() > armedUntil) {
-        const w = findWake(interim);
-        if (w && w.rest.length <= 2) { armedUntil = Date.now() + 8000; onState('wake', 'Listening... say your question'); }
+      if (interim && wantWake) {
+        const it = interim.trim(), w = findWake(it);
+        if (w && w.rest.length > 2) waitForEnd(w.rest);                     // "Hey Glasses, what is ..." in one go
+        else if (w) { if (Date.now() > armedUntil) { armedUntil = Date.now() + 8000; onState('wake', 'Listening... say your question'); } }
+        else if (Date.now() < armedUntil) waitForEnd(it);                    // question after a short pause
       }
     };
     rec.onerror = (e) => {
@@ -191,8 +219,12 @@ function nativeListener({ onCommand, onCaption, onState, onHeard, onFatal }) {
     heardAny = false; startedAt = Date.now();
     try { rec.start(); running = true; privacy.set('listener', 'mic'); onState('on', wantWake ? 'Say "Hey Glasses" ...' : 'Captions on'); } catch { running = false; }
   }
-  function stop() { if (rec) { try { rec.onend = null; rec.stop(); } catch { /* ignore */ } } running = false; rec = null; privacy.set('listener', null); }
-  function restart() { stop(); start(); }
+  function stop(discard) {
+    clearPending();
+    if (rec) { try { rec.onend = null; if (discard) { rec.onresult = null; rec.abort(); } else rec.stop(); } catch { /* ignore */ } }
+    running = false; rec = null; privacy.set('listener', null);
+  }
+  function restart(discard) { stop(discard); start(); }
 
   return {
     stop,

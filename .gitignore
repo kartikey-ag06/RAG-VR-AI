@@ -19,3 +19,5 @@ backend/data/
 _before_*/
 _*update*.tgz
 _*.tgz
+
+_*.md5

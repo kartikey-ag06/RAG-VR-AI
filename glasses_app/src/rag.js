@@ -199,6 +199,7 @@ export async function answerSmart(question, hits, cfg, onDelta) {
   let raw;
   try { raw = await callLlm(SMART_SYSTEM + styleRules(), user, cfg, onDelta); }
   catch (e) {
+    if (isAbort(e)) return { text: "Stopped.", mode: "offline", cited: [], stopped: true };
     return { text: `AI error (${cfg.provider}): ${e.message}\n\n` + (hits.length ? extractive(question, hits) : ""), mode: "offline", cited: hits.map((_, i) => i) };
   }
   return parseSmart(raw, hits);
@@ -214,15 +215,29 @@ function parseSmart(raw, hits) {
     for (const n of x[1].split(",")) { const i = parseInt(n, 10) - 1; if (i >= 0 && i < hits.length && !cited.includes(i)) cited.push(i); }
   const mode = (m && m[1].toUpperCase() === "GENERAL") || !cited.length ? "general" : "pdf";
   if (mode === "general") cited = [];
-  return { text: body, mode, cited };
+  return { text: body, mode, cited, stopped: raw.endsWith(STOPPED) };
 }
 
 let streamOk = true;
+// The answer being written right now can be cancelled (Stop button, Esc, "stop" by voice).
+let current = null;
+/** Cancels the AI answer being written now. Returns true if there was one. */
+export function stopAnswer() { if (!current) return false; current.abort(); current = null; return true; }
+const STOPPED = "(stopped)";
+const isAbort = (e) => e && (e.name === "AbortError" || e.message === STOPPED);
+
 async function callLlm(system, user, cfg, onDelta) {
+  const ac = new AbortController(); current = ac;
+  try { return await callLlmInner(system, user, cfg, onDelta, ac.signal); }
+  catch (e) { if (ac.signal.aborted) throw new Error(STOPPED); throw e; }
+  finally { if (current === ac) current = null; }
+}
+
+async function callLlmInner(system, user, cfg, onDelta, signal) {
   let r, j;
   if ((cfg.provider === "grok" || cfg.provider === "groq") && onDelta && streamOk && window.TextDecoder) {
     // streamed: the first words reach the lens in ~0.5 s instead of after the whole answer
-    r = await fetch(apiUrl("/api/grok/stream"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    r = await fetch(apiUrl("/api/grok/stream"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), signal,
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
     if (r.status === 404 || r.status === 405) streamOk = false;               // older server: fall back below
     else {
@@ -230,7 +245,10 @@ async function callLlm(system, user, cfg, onDelta) {
       const rd = r.body.getReader(), dec = new TextDecoder();
       let acc = "";
       for (;;) {
-        const { value, done } = await rd.read();
+        let chunk;
+        try { chunk = await rd.read(); }
+        catch (e) { if (signal.aborted && acc.trim()) return acc + "\n\n" + STOPPED; throw e; }   // keep what was written
+        const { value, done } = chunk;
         if (done) break;
         acc += dec.decode(value, { stream: true });
         try { onDelta(acc); } catch { /* display only */ }
@@ -241,7 +259,7 @@ async function callLlm(system, user, cfg, onDelta) {
     }
   }
   if (cfg.provider === "grok" || cfg.provider === "groq") {
-    r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: { "Content-Type": "application/json" },
+    r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: { "Content-Type": "application/json" }, signal,
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
     j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
@@ -389,6 +407,7 @@ export async function answerVision(question, photoInfo, hits, image, hint = "", 
   let raw;
   try { raw = await callLlm(VISION_SYSTEM + styleRules(), user, cfg.provider === "none" ? { provider: "groq" } : cfg, onDelta); }
   catch (e) {
+    if (isAbort(e)) return { text: "Stopped.", mode: "offline", cited: [], stopped: true };
     return { text: `I see: ${photoInfo.object}. ${photoInfo.details || ""}\n\n(AI answer failed: ${e.message})`, mode: "general", cited: [] };
   }
   return parseSmart(raw, hits.slice(0, 6));

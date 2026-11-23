@@ -9,7 +9,7 @@
 // Keys: hold V = talk · X = scan view · N / B = next / previous step · Tab = next source · [ ] = page.
 import { Mesh, PlaneGeometry, MeshBasicMaterial, CanvasTexture, SRGBColorSpace, DoubleSide, Vector3 } from '@iwsdk/core';
 import { RagIndex, pageImageUrl, figureUrl, loadLlmConfig, answerSmart, serverSearch, serverIndexVersion, logProcOps,
-  answerVision, describePhoto, visionStatus, VR_VIEW_HINT, setAnswerStyle, api, cleanBody } from './rag.js';
+  answerVision, describePhoto, visionStatus, VR_VIEW_HINT, setAnswerStyle, api, cleanBody, stopAnswer } from './rag.js';
 import { setupVoice } from './voice.js';
 import { setupCamera } from './camera.js';
 import { setupApps, APPS } from './apps.js';
@@ -67,6 +67,9 @@ export function setupRag(world) {
         border-color:transparent !important;color:#fff !important;border-radius:16px !important;box-shadow:0 8px 26px rgba(80,120,255,.45)}
       #rag-mic.rec{background:linear-gradient(135deg,#ff4d6d,#c9184a) !important;animation:ragpulse 1.1s infinite}
       @keyframes ragpulse{0%{box-shadow:0 0 0 0 rgba(255,77,109,.6)}100%{box-shadow:0 0 0 16px rgba(255,77,109,0)}}
+      #rag-stop{display:none;width:100%;margin-top:8px;padding:11px 10px;font-weight:650;color:#fff !important;border-radius:14px !important;
+        background:linear-gradient(135deg,#ff6b6b,#d63a3a) !important;border-color:transparent !important}
+      #rag-stop.show{display:block}
       #rag-voice{font-size:12px;color:#a9b6d3;min-height:17px;margin:6px 2px 0;text-align:center}
       .rg-row{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:9px}
       .rg-row button{padding:8px 3px;font-size:11.5px}
@@ -118,6 +121,7 @@ export function setupRag(world) {
         <div class="rg-tabs"><button data-tab="ask" class="sel">🎤 Ask</button><button data-tab="tools">🛠 Tools</button><button data-tab="set">⚙ Settings</button></div>
         <div class="rg-pane sel" data-pane="ask">
           <button id="rag-mic" title="Tap to talk (tap again to stop), or hold V">🎤 Tap to ask</button>
+          <button id="rag-stop" title="Stop the answer (Esc, or say &quot;Hey Glasses, stop&quot;)">■ Stop answer</button>
           <div id="rag-voice">Hold <b>V</b> or tap the mic, then speak</div>
           <div class="rg-row">
             <button id="rag-scan" title="Scan the object in the red ring of your view (or press X)">🔍 Scan</button>
@@ -397,7 +401,7 @@ export function setupRag(world) {
         state.answer = body + ' ▍';
         const now = performance.now();
         if (now - lastDraw > 120) { lastDraw = now; syncDom(); }
-        if (speaking()) {
+        if (speaking() && !state.stopped) {
           const rest = body.slice(spoken), m = rest.match(/^[\s\S]*?[.!?।](\s|$)/);
           if (m && m[0].trim().length > 12) { speakChunk(m[0], lang); spoken += m[0].length; }
         }
@@ -526,12 +530,34 @@ export function setupRag(world) {
     if (r) ask(`What is ${r.machine_id} and what are its main troubleshooting steps?`, { raw: true });
   }
 
+  // ---------- stop ----------
+  // Cuts off the answer being written (cancels the AI request) and the voice reading it aloud.
+  const STOP_RE = /^(please\s+)?(stop|stop it|stop now|stop talking|cancel|enough|that'?s enough|be quiet|quiet|silence|shut up|bas|ruko|ruk jao|band karo)[.!]?$/i;
+  const isStopWord = (q) => STOP_RE.test(String(q || '').trim());
+  function stopAll() {
+    const wasWriting = stopAnswer();
+    const wasTalking = !!(window.speechSynthesis && speechSynthesis.speaking);
+    stopSpeaking();
+    if (extras.teleprompter.on) extras.teleprompter.pause();
+    if (wasWriting || state.busy) state.stopped = true;
+    refreshStop();
+    if (wasWriting || wasTalking) hud.toast('■ Stopped', 'info', 1800);
+  }
+  // the Stop button is shown only while there is something to stop
+  function refreshStop() {
+    const on = state.busy || !!(window.speechSynthesis && speechSynthesis.speaking);
+    $('rag-stop').classList.toggle('show', on);
+  }
+  setInterval(refreshStop, 300);
+  $('rag-stop').onclick = stopAll;
+
   // ---------- answering ----------
   async function ask(q, opts = {}) {
     q = (q || '').trim();
     if (!q && state.photo) q = PHOTO_Q;
+    if (isStopWord(q)) { stopAll(); return; }                 // "stop" works even while an answer is being written
     if (!q || state.busy || !state.index) return;
-    stopSpeaking();
+    stopSpeaking(); state.stopped = false;
     if (!opts.raw) {
       try { if ((await extras.route(q)) || (await assistant.route(q))) { state.query = q; drawAnswer(); return; } }
       catch (e) { hud.toast('Command failed: ' + e.message, 'bad', 6000); }
@@ -571,7 +597,8 @@ export function setupRag(world) {
     state.busy = false; syncDom();
     hud.toast((res.mode === 'pdf' ? '📄 ' : '🌐 ') + res.text.replace(/\s+/g, ' ').slice(0, 70), res.mode === 'pdf' ? 'ok' : 'info', 6000);
     if (state.lowConf) hud.toast('⚠ Low confidence: the documents only partly match. Say "call expert" to escalate.', 'warn', 8000);
-    if (st) st.finish(res.text); else say(res.text);
+    if (res.stopped || state.stopped) { state.stopped = true; stopSpeaking(); }
+    else if (st) st.finish(res.text); else say(res.text);
     state.lastMs = Math.round(performance.now() - t0);
     const sources = state.hits.map((h) => `${h.doc.title} - p.${h.chunk.page}`);
     session.log('answer', { text: res.text.slice(0, 1200), mode: res.mode, sources, conf: state.conf });
@@ -693,7 +720,7 @@ export function setupRag(world) {
         case 'next': if (extras.teleprompter.on) extras.teleprompter.next(); else if (!workflow.next() && !extras.nav.next()) showPage(state.doc, state.page + 1); break;
         case 'prev': if (extras.teleprompter.on) extras.teleprompter.prev(); else if (!workflow.prev() && !extras.nav.prev()) showPage(state.doc, state.page - 1); break;
         case 'repeat': if (!workflow.repeat() && !extras.nav.repeat()) say(state.answer); break;
-        case 'pause': if (extras.teleprompter.on) extras.teleprompter.pause(); else stopSpeaking(); break;
+        case 'pause': if (extras.teleprompter.on) extras.teleprompter.pause(); else stopAll(); break;
         case 'teleprompter': openPrompterDialog(); break;
         case 'meeting': await (extras.meeting.on ? extras.meeting.stop() : extras.meeting.start()); refreshChips(); break;
         case 'gestures': await (extras.gestures.on ? extras.gestures.stop() : extras.gestures.start()); refreshChips(); break;
@@ -719,7 +746,7 @@ export function setupRag(world) {
         case 'expert': await callExpert(); break;
         case 'hangup': expert.hangup(); refreshChips(); hud.toast('Call ended', 'info'); break;
         case 'clearMachine': S.machine = ''; refreshChips(); drawAnswer(); hud.toast('Machine filter cleared', 'info'); break;
-        case 'quiet': stopSpeaking(); break;
+        case 'quiet': stopAll(); break;
         default: hud.toast('Unknown command: ' + cmd, 'warn');
       }
     } catch (e) { hud.toast(`${cmd}: ${e.message}`, 'bad', 7000); }
@@ -936,6 +963,7 @@ export function setupRag(world) {
       if (e.key === '-') { extras.teleprompter.faster(-20); return; }
       if (e.key === 'Escape') { extras.teleprompter.stop(); return; }
     }
+    if (e.key === 'Escape') { stopAll(); return; }
     if (e.key === ']') showPage(state.doc, state.page + 1);
     else if (e.key === '[') showPage(state.doc, state.page - 1);
     else if (e.key === 'Tab') { e.preventDefault(); nextHit(); }
@@ -970,7 +998,7 @@ export function setupRag(world) {
       button: $('rag-mic'),
       useServer: !!(state.llm && state.llm.stt),
       getLang: () => langByCode(S.voiceLang),
-      onStart: () => { stopSpeaking(); listener.pause(); },
+      onStart: () => { stopAnswer(); stopSpeaking(); listener.pause(); },
       onStop: () => listener.resume(),
       onState: (kind, msg) => {
         $('rag-voice').textContent = msg;
