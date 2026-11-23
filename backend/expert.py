@@ -123,7 +123,7 @@ def register(app, root, auth=None):
         return {"ok": True}
 
     @app.get("/api/expert/{rid}/poll")
-    def poll(rid: str, me: str, since: int = 0):
+    def poll(rid: str, me: str = "worker", since: int = 0):
         with lock:
             r = rooms.get(rid)
             if not r:

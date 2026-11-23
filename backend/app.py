@@ -228,7 +228,8 @@ def ui_asset(name: str):
     f = ROOT / "backend" / "static" / name
     if not re.fullmatch(r"[\w.-]+\.(css|js|svg)", name) or not f.is_file():
         return JSONResponse({"error": "not found"}, 404)
-    return FileResponse(f, headers={"Cache-Control": "no-cache"})
+    mime = "text/css" if name.endswith(".css") else ("application/javascript" if name.endswith(".js") else ("image/svg+xml" if name.endswith(".svg") else None))
+    return FileResponse(f, media_type=mime, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/upload")

@@ -146,7 +146,9 @@ MODES = {"walk": "walk", "walking": "walk", "foot": "walk", "bike": "bike", "cyc
 
 def register(app):
     @app.get("/api/directions")
-    def directions(to: str, mode: str = "walk", frm: str = "", lat: float = None, lon: float = None):
+    def directions(to: str = "", mode: str = "walk", frm: str = "", lat: float = None, lon: float = None):
+        if not to.strip():
+            return JSONResponse({"error": "destination 'to' is required"}, 400)
         mode = MODES.get(mode.lower(), "walk")
         near = (lat, lon) if lat is not None and lon is not None else None
         try:
@@ -164,7 +166,9 @@ def register(app):
         return dict(rt, mode=mode, **{"from": start, "to": dest})
 
     @app.get("/api/places")
-    def places(q: str, lat: float = None, lon: float = None):
+    def places(q: str = "", lat: float = None, lon: float = None):
+        if not q.strip():
+            return JSONResponse({"error": "search query 'q' is required"}, 400)
         try:
             hit = geocode(q, (lat, lon) if lat is not None and lon is not None else None)
         except Exception as e:
