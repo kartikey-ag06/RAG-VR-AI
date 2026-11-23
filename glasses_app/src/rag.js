@@ -13,13 +13,40 @@ export function apiUrl(path) {
   return API_BASE ? `${API_BASE}${path}` : path;
 }
 
+/** Headers for every backend call: the user's access token (documents with groups need it). */
+export function authHeaders(extra = {}) {
+  let t = "";
+  try { t = localStorage.getItem("vr-user-token") || ""; } catch { /* private mode */ }
+  return t ? { ...extra, "X-VR-Token": t } : extra;
+}
+
+/** JSON helper for the newer modules: api("/api/notes"), api("/api/notes", {text}) -> POST */
+export async function api(path, body, method) {
+  const opts = { method: method || (body === undefined ? "GET" : "POST"), headers: authHeaders(body === undefined ? {} : { "Content-Type": "application/json" }) };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(apiUrl(path), opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+// ---------------- answer style: language + length (full / glance card / spoken) ----------------
+const style = { lang: "English", mode: "full" };
+export function setAnswerStyle(lang, mode) { if (lang) style.lang = lang; if (mode) style.mode = mode; }
+function styleRules() {
+  const len = { full: "max 120 words", glance: "at most 3 short numbered points, each under 12 words (small lens display)",
+    spoken: "at most 25 words in 1-2 short sentences, no lists (it will be read aloud)" }[style.mode] || "max 120 words";
+  return `\nLength: ${len}.` + (style.lang && style.lang !== "English"
+    ? `\nWrite the answer in ${style.lang}. Keep the SOURCE line exactly in English as described.` : "");
+}
+
 export function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter(t => t.length > 1 && !STOP.has(t));
 }
 
 export class RagIndex {
   static async load(url = (API_BASE ? `${API_BASE}/` : import.meta.env.BASE_URL) + "rag/index.json") {
-    const data = await (await fetch(url, { cache: "no-store" })).json();
+    const data = await (await fetch(url, { cache: "no-store", headers: authHeaders() })).json();
     indexVersion = data.version || 0;
     const ix = new RagIndex();
     ix.data = data;
@@ -61,7 +88,16 @@ export class RagIndex {
 let indexVersion = 0;
 export function pageImageUrl(docId, page) {
   const base = API_BASE ? `${API_BASE}/` : import.meta.env.BASE_URL;
-  return base + `rag/pages/d${String(docId).padStart(2, "0")}_p${String(page).padStart(3, "0")}.jpg?v=${indexVersion}`;
+  return base + `rag/pages/d${String(docId).padStart(2, "0")}_p${String(page).padStart(3, "0")}.jpg?v=${indexVersion}` + tokenParam();
+}
+/** Cut-out diagram / table of a page (see indexer.py _page_figures). */
+export function figureUrl(docId, file) {
+  const base = API_BASE ? `${API_BASE}/` : import.meta.env.BASE_URL;
+  return base + `rag/figures/${docId}/${file}?v=${indexVersion}` + tokenParam();
+}
+function tokenParam() {          // <img> cannot send headers: protected pages get the token in the URL
+  let t = ""; try { t = localStorage.getItem("vr-user-token") || ""; } catch { /* ignore */ }
+  return t ? "&token=" + encodeURIComponent(t) : "";
 }
 
 /** Current index version on the server (null when the server has no upload support). */
@@ -141,18 +177,27 @@ const SMART_SYSTEM =
   "1. If the excerpts contain the answer (fully or partly), answer from them and cite like [1], [2]. " +
   "Your FIRST line must be exactly: SOURCE: PDF [n, m] (the excerpt numbers you used, most important first).\n" +
   "2. If the excerpts do not contain the answer, answer from your general knowledge. Your FIRST line must be exactly: SOURCE: GENERAL\n" +
-  "3. Then a blank line, then the answer in plain text, max 120 words.\n" +
+  "3. Then a blank line, then the answer in plain text (see the length rule).\n" +
   "4. Never invent citations, section numbers, case numbers or penalty amounts. If unsure, say so.";
 
 /** returns { text, mode: "pdf" | "general" | "offline", cited: [hit indexes] } */
-export async function answerSmart(question, hits, cfg) {
+/** The answer text as shown on the lens: no "SOURCE:" line, no markdown. Works on a half-written answer too. */
+export function cleanBody(raw) {
+  const m = String(raw || "").match(/^\s*SOURCE:\s*(PDF|GENERAL)?\s*(\[[^\]]*\]?)?\s*/i);
+  let body = m ? raw.slice(m[0].length) : String(raw || "");
+  if (/^\s*S(O(U(R(C(E:?)?)?)?)?)?\s*$/i.test(body)) body = "";          // header still arriving
+  return body.trim().replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1").replace(/\*\*/g, "")
+    .replace(/^#+\s*/gm, "").replace(/^\s*[-*]\s+/gm, "• ");
+}
+
+export async function answerSmart(question, hits, cfg, onDelta) {
   if (cfg.provider === "none") {
     if (!hits.length) return { text: "No matching text in the 10 SEBI orders, and no AI is connected for general questions.", mode: "offline", cited: [] };
     return { text: extractive(question, hits), mode: "offline", cited: hits.map((_, i) => i) };
   }
   const user = (hits.length ? buildPrompt(question, hits) : "Excerpts: (none matched)\n\nQuestion: " + question);
   let raw;
-  try { raw = await callLlm(SMART_SYSTEM, user, cfg); }
+  try { raw = await callLlm(SMART_SYSTEM + styleRules(), user, cfg, onDelta); }
   catch (e) {
     return { text: `AI error (${cfg.provider}): ${e.message}\n\n` + (hits.length ? extractive(question, hits) : ""), mode: "offline", cited: hits.map((_, i) => i) };
   }
@@ -162,8 +207,7 @@ export async function answerSmart(question, hits, cfg) {
 /** Reads the "SOURCE: PDF [n]" / "SOURCE: GENERAL" first line and the cited excerpt numbers. */
 function parseSmart(raw, hits) {
   const m = raw.match(/^\s*SOURCE:\s*(PDF|GENERAL)\s*(\[[^\]]*\])?\s*/i);
-  let body = (m ? raw.slice(m[0].length) : raw).trim()
-    .replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1").replace(/^#+\s*/gm, "").replace(/^\s*[-*]\s+/gm, "• "); // plain text for the VR panel
+  let body = cleanBody(raw);                                                     // plain text for the VR panel
   let cited = [];
   const nums = (m && m[2] ? m[2] : "") + " " + body;
   for (const x of nums.matchAll(/\[(\d+(?:\s*,\s*\d+)*)\]/g))
@@ -173,8 +217,29 @@ function parseSmart(raw, hits) {
   return { text: body, mode, cited };
 }
 
-async function callLlm(system, user, cfg) {
+let streamOk = true;
+async function callLlm(system, user, cfg, onDelta) {
   let r, j;
+  if ((cfg.provider === "grok" || cfg.provider === "groq") && onDelta && streamOk && window.TextDecoder) {
+    // streamed: the first words reach the lens in ~0.5 s instead of after the whole answer
+    r = await fetch(apiUrl("/api/grok/stream"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
+    if (r.status === 404 || r.status === 405) streamOk = false;               // older server: fall back below
+    else {
+      if (!r.ok) { j = await r.json().catch(() => ({})); throw new Error(j.error || "HTTP " + r.status); }
+      const rd = r.body.getReader(), dec = new TextDecoder();
+      let acc = "";
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) break;
+        acc += dec.decode(value, { stream: true });
+        try { onDelta(acc); } catch { /* display only */ }
+      }
+      acc += dec.decode();
+      if (!acc.trim()) throw new Error("empty answer");
+      return acc;
+    }
+  }
   if (cfg.provider === "grok" || cfg.provider === "groq") {
     r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
@@ -248,8 +313,12 @@ export async function generate(question, hits, cfg) {
 
 // ---------------- Voice: speech-to-text ----------------
 /** Sends recorded audio to the local server, which forwards it to Groq Whisper. Returns the text. */
-export async function transcribe(blob) {
-  const r = await fetch(apiUrl("/api/stt"), { method: "POST", headers: { "Content-Type": blob.type || "audio/webm" }, body: blob });
+export async function transcribe(blob, lang = "", hint = "") {
+  const q = new URLSearchParams();
+  if (lang) q.set("lang", lang);
+  if (hint) q.set("prompt", hint);                // spelling hint for Whisper, e.g. "Hey Glasses, "
+  const r = await fetch(apiUrl("/api/stt" + (q.toString() ? "?" + q : "")), { method: "POST",
+    headers: authHeaders({ "Content-Type": blob.type || "audio/webm" }), body: blob });
   const j = await r.json();
   if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
   return (j.text || "").trim();
@@ -258,17 +327,18 @@ export async function transcribe(blob) {
 // ---------------- Hybrid search on the Python backend ----------------
 /** Asks the Python backend (embeddings + TF-IDF). Returns hits in the same shape as RagIndex.search,
  *  or null when the backend is not there (PowerShell server / offline) so the caller can fall back. */
-export async function serverSearch(index, query, k = 8) {
+export async function serverSearch(index, query, k = 8, machine = "") {
   try {
-    const r = await fetch(apiUrl("/api/search"), { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, k }), signal: AbortSignal.timeout(8000) });
+    const r = await fetch(apiUrl("/api/search"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ query, k, machine }), signal: AbortSignal.timeout(10000) });
     if (!r.ok) return null;
     const j = await r.json();
     const hits = (j.hits || []).map((h) => {
       const chunk = index.data.chunks[h.i];
       return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw };
     });
-    return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits };
+    return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits,
+      conf: j.conf, lowConfidence: !!j.lowConfidence, machine: j.machine, machineMatched: j.machineMatched, engine: j.engine };
   } catch { return null; }
 }
 
@@ -312,12 +382,12 @@ const VISION_SYSTEM = SMART_SYSTEM +
 /** Same result shape as answerSmart: { text, mode, cited }.
  *  Only ONE vision call per photo (describePhoto); the answer comes from the normal chat model using that
  *  description, which keeps the scan inside Groq's free-tier tokens-per-minute limit. */
-export async function answerVision(question, photoInfo, hits, image, hint = "", cfg = { provider: "groq" }) {
+export async function answerVision(question, photoInfo, hits, image, hint = "", cfg = { provider: "groq" }, onDelta) {
   const seen = "PHOTO DESCRIPTION (from the vision model): " + (photoInfo.object || "unknown object") + ". " +
     (photoInfo.details ? photoInfo.details + " " : "") + "Text on it: " + (photoInfo.text_seen || "none") + ".\n\n";
   const user = seen + (hits.length ? buildPrompt(question, hits.slice(0, 6)) : "Excerpts: (none matched)\n\nQuestion: " + question);
   let raw;
-  try { raw = await callLlm(VISION_SYSTEM, user, cfg.provider === "none" ? { provider: "groq" } : cfg); }
+  try { raw = await callLlm(VISION_SYSTEM + styleRules(), user, cfg.provider === "none" ? { provider: "groq" } : cfg, onDelta); }
   catch (e) {
     return { text: `I see: ${photoInfo.object}. ${photoInfo.details || ""}\n\n(AI answer failed: ${e.message})`, mode: "general", cited: [] };
   }

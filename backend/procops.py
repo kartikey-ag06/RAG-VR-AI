@@ -14,6 +14,7 @@ Revisions themselves live in the document store (indexer.Store.add_revision).
 
 This module only ADDS routes; nothing in the existing app depends on it.
 """
+from net import HTTP, JSONB
 import json
 import re
 import threading
@@ -30,16 +31,21 @@ NO_CACHE = {"Cache-Control": "no-store"}
 
 
 class EventLog:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, db=None):
         self.path = path
+        self.db = db                       # Postgres when configured (survives server restarts)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
 
     def add(self, ev):
+        if self.db:
+            return self.db.add_event(ev)
         with self.lock, self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
 
     def all(self):
+        if self.db:
+            return self.db.events()
         if not self.path.exists():
             return []
         out = []
@@ -53,6 +59,8 @@ class EventLog:
 
     def archive(self):
         """Demo reset: keeps the old log as events.<time>.bak instead of deleting it."""
+        if self.db:
+            return self.db.archive_events()
         with self.lock:
             if self.path.exists():
                 self.path.replace(self.path.with_name(f"events.{int(time.time())}.bak"))
@@ -91,9 +99,16 @@ DRAFT_SYSTEM = (
 )
 
 
-def register(app, store, llm, root: Path):
+def register(app, store, llm, root: Path, auth=None):
     """Adds the ProcOps routes to the FastAPI app. llm(messages, max_tokens) -> str (raises on error)."""
-    log = EventLog(store.root / "procops" / "events.jsonl")
+    log = EventLog(store.root / "procops" / "events.jsonl", db=store.db)
+
+    def locked(req):        # changing documents needs an admin once the server is protected
+        return auth is not None and auth.admin_required(req) and not auth.is_admin(req)
+
+    def visible(uid, req):
+        e = store.doc_entry(uid)
+        return bool(e) and (auth is None or auth.can_see(e.get("groups", []), auth.user_of(req)))
     page_html = root / "backend" / "static" / "procops.html"
 
     @app.get("/procops")
@@ -102,9 +117,9 @@ def register(app, store, llm, root: Path):
 
     # ---------- 1. Run: the glasses log each question (fire-and-forget from the app)
     @app.post("/api/procops/event")
-    async def procops_event(req: Request):
+    def procops_event(req: Request, _body=JSONB):
         try:
-            b = await req.json()
+            b = (_body if _body is not None else {})
         except ValueError:
             return JSONResponse({"error": "bad json"}, 400)
         q = str(b.get("q", "")).strip()[:500]
@@ -113,6 +128,15 @@ def register(app, store, llm, root: Path):
         uid = str(b.get("uid") or "")
         ev = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "q": q,
               "mode": str(b.get("mode", ""))[:10], "ms": int(b.get("ms") or 0)}
+        try:
+            if b.get("conf") is not None:
+                ev["conf"] = round(float(b["conf"]), 3)          # best semantic match of the search
+        except (TypeError, ValueError):
+            pass
+        if b.get("hits") is not None:
+            ev["hits"] = int(b.get("hits") or 0)
+        if b.get("machine"):
+            ev["machine"] = str(b["machine"])[:80]
         if UID.fullmatch(uid) and store.doc_entry(uid):
             try:
                 page = int(b.get("page"))
@@ -125,7 +149,7 @@ def register(app, store, llm, root: Path):
 
     # ---------- 2. Detect: friction heatmap
     @app.get("/api/procops/summary")
-    def procops_summary():
+    def procops_summary(req: Request = None):
         events = log.all()
         by_page = defaultdict(list)
         gaps = defaultdict(int)
@@ -135,8 +159,11 @@ def register(app, store, llm, root: Path):
             else:
                 gaps[ev["q"]] += 1
         docs = []
+        user = auth.user_of(req) if (auth is not None and req is not None) else None
         for e in store.list():
             if e["status"] != "ready":
+                continue
+            if auth is not None and req is not None and not auth.can_see(e.get("groups", []), user):
                 continue
             revs = store.revisions(e["uid"])
             pages, total_open = [], 0
@@ -159,28 +186,45 @@ def register(app, store, llm, root: Path):
                          "version": revs["version"], "open": total_open, "hot": pages,
                          "history": revs["history"][::-1]})
         docs.sort(key=lambda d: (-d["open"], -len(d["history"]), d["title"]))
-        return JSONResponse({"events": len(events), "docs": docs,
+        # knowledge-gap analytics: most asked, low-confidence answers, zero-hit questions
+        most = defaultdict(lambda: {"n": 0, "q": ""})
+        low, zero = [], defaultdict(int)
+        for ev in events:
+            k = most[norm_q(ev["q"])]; k["n"] += 1; k["q"] = ev["q"]
+            if ev.get("hits") == 0 or (ev.get("mode") in ("general", "offline") and not ev.get("uid")):
+                zero[ev["q"]] += 1
+            elif ev.get("conf") is not None and ev["conf"] < 0.62:
+                low.append({"q": ev["q"], "conf": ev["conf"], "ts": ev["ts"], "page": ev.get("page"), "uid": ev.get("uid")})
+        titles = {d["uid"]: d["title"] for d in docs}
+        for x in low:
+            x["title"] = titles.get(x.get("uid"), "")
+        analytics = {"mostAsked": sorted(most.values(), key=lambda k: -k["n"])[:15],
+                     "lowConfidence": sorted(low, key=lambda x: x["conf"])[:20],
+                     "zeroHit": sorted(({"q": q, "n": n} for q, n in zero.items()), key=lambda g: -g["n"])[:20]}
+        return JSONResponse({"events": len(events), "docs": docs, "analytics": analytics,
                              "gaps": sorted(({"q": q, "n": n} for q, n in gaps.items()), key=lambda g: -g["n"])[:30],
                              "indexVersion": store.snapshot["version"]}, headers=NO_CACHE)
 
     @app.get("/api/procops/page/{uid}/{page}")
-    def procops_page_image(uid: str, page: int, original: int = 0):
-        p = store.page_image_uid(uid, page, original=bool(original)) if UID.fullmatch(uid) else None
+    def procops_page_image(uid: str, page: int, req: Request, original: int = 0):
+        p = store.page_image_uid(uid, page, original=bool(original)) if UID.fullmatch(uid) and visible(uid, req) else None
         if not p:
             return JSONResponse({"error": "page not found"}, 404)
         return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})  # URL carries ?t=<index version>
 
     # ---------- 3. Fix: AI drafts a redline, a human approves it
     @app.post("/api/procops/draft")
-    async def procops_draft(req: Request):
-        b = await req.json()
+    def procops_draft(req: Request, _body=JSONB):
+        if locked(req):
+            return JSONResponse({"error": "admin token required"}, 403)
+        b = (_body if _body is not None else {})
         uid, page = str(b.get("uid", "")), int(b.get("page") or 0)
         if not UID.fullmatch(uid) or not store.doc_entry(uid):
             return JSONResponse({"error": "document not found"}, 404)
         text = store.page_text(uid, page)
         if text is None:
             return JSONResponse({"error": "page not found"}, 404)
-        summary = procops_summary()
+        summary = procops_summary(req)
         doc = next((d for d in json.loads(summary.body)["docs"] if d["uid"] == uid), None)
         hot = next((p for p in (doc or {}).get("hot", []) if p["page"] == page), None)
         questions = [q["q"] + (f"  (asked {q['n']}x)" if q["n"] > 1 else "") for q in (hot or {}).get("questions", [])]
@@ -204,8 +248,10 @@ def register(app, store, llm, root: Path):
                 "evidence": questions, "original_text": text, "next_version": _next(doc["version"])}
 
     @app.post("/api/procops/approve")
-    async def procops_approve(req: Request):
-        b = await req.json()
+    def procops_approve(req: Request, _body=JSONB):
+        if locked(req):
+            return JSONResponse({"error": "admin token required"}, 403)
+        b = (_body if _body is not None else {})
         uid, page = str(b.get("uid", "")), int(b.get("page") or 0)
         text = str(b.get("text", "")).strip()
         if not UID.fullmatch(uid):
@@ -220,8 +266,10 @@ def register(app, store, llm, root: Path):
         return {"approved": rec}
 
     @app.post("/api/procops/reset")
-    async def procops_reset(req: Request):
-        b = await req.json()
+    def procops_reset(req: Request, _body=JSONB):
+        if locked(req):
+            return JSONResponse({"error": "admin token required"}, 403)
+        b = (_body if _body is not None else {})
         uid = b.get("uid") or None
         if uid and not UID.fullmatch(str(uid)):
             return JSONResponse({"error": "document not found"}, 404)

@@ -96,7 +96,7 @@ async function grabTab(hideEls) {
 }
 
 /** Middle 70% of the view, max 1024 px, with the red ring that marks where the user looks. */
-function finish(src, sw = src.width) {
+function finish(src, sw = src.width, ring = true) {
   const sh = src.height;
   const cw = sw * KEEP, ch = sh * KEEP, cx = (sw - cw) / 2, cy = (sh - ch) / 2;
   const s = Math.min(1, MAX_SIDE / Math.max(cw, ch));
@@ -105,6 +105,7 @@ function finish(src, sw = src.width) {
   const x = out.getContext('2d');
   x.fillStyle = '#000'; x.fillRect(0, 0, out.width, out.height);
   x.drawImage(src, cx, cy, cw, ch, 0, 0, out.width, out.height);
+  if (!ring) return out.toDataURL('image/jpeg', 0.9);
   const R = Math.round(Math.min(out.width, out.height) * 0.12);
   x.strokeStyle = 'rgba(255,40,40,0.9)'; x.lineWidth = Math.max(2, R / 14);
   x.beginPath(); x.arc(out.width / 2, out.height / 2, R, 0, Math.PI * 2); x.stroke();
@@ -115,24 +116,24 @@ function finish(src, sw = src.width) {
  * Returns { image, how }. hideMeshes = our 3D panels, hideEls = our DOM overlays (only needed for the
  * tab-capture fallback, which films the whole tab).
  */
-export async function captureVrView(world, hideMeshes = [], hideEls = []) {
+export async function captureVrView(world, hideMeshes = [], hideEls = [], ring = true) {
   const r = world.renderer, app = r.domElement;
   const was = hideMeshes.map((m) => m.visible);
   hideMeshes.forEach((m) => { m.visible = false; });
   try {
     if (!r.xr.isPresenting) {
       r.render(world.scene, world.camera);                 // read in the same task (buffer still valid)
-      return { image: finish(composite([app])), how: 'scene' };
+      return { image: finish(composite([app]), undefined, ring), how: 'scene' };
     }
     await nextFrame(); await nextFrame();                  // a frame rendered without our panels
     const list = layers(app);
     const pic = await new Promise((res) => requestAnimationFrame(() => res(composite(list))));
     const roomLayers = list.length - 1;
-    if (blackShare(pic) < 0.85) return { image: finish(pic), how: roomLayers ? 'room+app' : 'app' };
+    if (blackShare(pic) < 0.85) return { image: finish(pic, undefined, ring), how: roomLayers ? 'room+app' : 'app' };
     // the room was not readable from its canvas (e.g. Immersive Web Emulator extension) -> film the tab
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return { image: finish(pic), how: 'app-only' };
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return { image: finish(pic, undefined, ring), how: 'app-only' };
     const tab = await grabTab(hideEls);
-    return { image: finish(tab), how: 'tab' };
+    return { image: finish(tab, undefined, ring), how: 'tab' };
   } finally {
     hideMeshes.forEach((m, i) => { m.visible = was[i]; });
   }
@@ -157,4 +158,26 @@ export function addAimRing() {
     'border-radius:50%;pointer-events:none;z-index:2147482000;box-shadow:0 0 0 1px rgba(0,0,0,.35)';
   document.body.appendChild(d);
   return d;
+}
+
+/** Live video of what the user sees (room + app layers), for recording and for the remote expert. */
+export function viewStream(world, fps = 24) {
+  const app = world.renderer.domElement;
+  const out = document.createElement('canvas');
+  const x = out.getContext('2d');
+  let on = true;
+  const tick = () => {
+    if (!on) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(innerWidth * dpr / 2), h = Math.round(innerHeight * dpr / 2);   // half size is plenty
+    if (out.width !== w || out.height !== h) { out.width = w; out.height = h; }
+    x.fillStyle = '#000'; x.fillRect(0, 0, w, h);
+    for (const c of (world.renderer.xr.isPresenting ? layers(app) : [app])) {
+      const r = c.getBoundingClientRect();
+      try { x.drawImage(c, r.left * dpr / 2, r.top * dpr / 2, r.width * dpr / 2, r.height * dpr / 2); } catch { /* ignore */ }
+    }
+    if (document.hidden) setTimeout(tick, 1000 / fps); else requestAnimationFrame(tick);
+  };
+  tick();
+  return { stream: out.captureStream(fps), stop: () => { on = false; } };
 }

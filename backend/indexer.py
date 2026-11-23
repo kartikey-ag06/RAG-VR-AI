@@ -138,17 +138,64 @@ def split_words_into_pages(text):
     return pages or [""]
 
 
+def _page_figures(page, pno, page_dir):
+    """Cuts tables, pictures and diagrams (vector drawings) out of one PDF page as their own small images,
+    so small lens displays can show just the diagram / table instead of a whole A4 page."""
+    import pymupdf
+    area = page.rect.width * page.rect.height
+    boxes = []
+    # (page.find_tables() is accurate but ~0.2 s per page; ruled tables already show up as drawing clusters)
+    try:
+        for im in page.get_image_info():
+            boxes.append(("image", pymupdf.Rect(im["bbox"])))
+    except Exception:
+        pass
+    try:
+        for r in page.cluster_drawings():
+            boxes.append(("diagram", pymupdf.Rect(r)))
+    except Exception:
+        pass
+    out, kept = [], []
+    for kind, r in sorted(boxes, key=lambda b: -b[1].get_area()):
+        r = r & page.rect
+        a = r.get_area()
+        if a < area * 0.03 or a > area * 0.92 or r.width < 60 or r.height < 40:
+            continue                                            # too small (lines, logos) or the whole page
+        if any((r & k).get_area() > 0.6 * a for k in kept):
+            continue                                            # mostly inside a figure we already have
+        kept.append(r)
+        if kind == "diagram" and len(page.get_textbox(r).split()) > 25:
+            kind = "table"                                      # ruled lines full of text = a table
+        k = len(out) + 1
+        clip = pymupdf.Rect(r.x0 - 6, r.y0 - 6, r.x1 + 6, r.y1 + 6) & page.rect
+        zoom = min(3.0, 1100 / max(clip.width, 1))
+        f = f"fig_p{pno:03d}_{k}.jpg"
+        page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip).save(str(page_dir / f), jpg_quality=80)
+        above = pymupdf.Rect(page.rect.x0, max(page.rect.y0, r.y0 - 40), page.rect.x1, r.y0)
+        caption = " ".join(page.get_textbox(above).split())[:160] or " ".join(page.get_textbox(r).split())[:160]
+        out.append({"page": pno, "k": k, "kind": kind, "file": f, "w": round(r.width), "h": round(r.height),
+                    "caption": caption})
+        if k >= 4:
+            break
+    return out
+
+
 def extract(path, ext, page_dir, title):
-    """Returns the list of page texts and writes pNNN.jpg for every page."""
+    """Returns the list of page texts and writes pNNN.jpg for every page (+ figures.json for PDFs)."""
     page_dir.mkdir(parents=True, exist_ok=True)
     if ext == ".pdf":
         import pymupdf
-        texts = []
+        texts, figs = [], []
         with pymupdf.open(path) as doc:
             for i, page in enumerate(doc):
                 texts.append(page.get_text())
                 zoom = IMG_W / page.rect.width
                 page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).save(str(page_dir / f"p{i + 1:03d}.jpg"), jpg_quality=70)
+                try:
+                    figs += _page_figures(page, i + 1, page_dir)
+                except Exception as ex:
+                    print(f"[figures] page {i + 1}: {ex}", flush=True)
+        (page_dir / "figures.json").write_text(json.dumps(figs), "utf-8")
         return texts
     if ext == ".docx":
         import docx
@@ -177,8 +224,9 @@ def _decodes(raw, enc):
 
 # ------------------------------------------------------------------ the store
 class Store:
-    def __init__(self, root: Path, seed_dir: Path = None):
+    def __init__(self, root: Path, seed_dir: Path = None, db=None):
         self.root = root
+        self.db = db                      # db.DB (Postgres/Neon) or None = local files only
         self.files, self.pages, self.emb = root / "files", root / "pages", root / "emb"
         for p in (self.files, self.pages, self.emb):
             p.mkdir(parents=True, exist_ok=True)
@@ -200,13 +248,22 @@ class Store:
                          "vocab": {}, "matrix": None, "uids": []}
         self.state = "idle"
         self.manifest = json.loads(self.manifest_path.read_text("utf-8")) if self.manifest_path.exists() else []
+        if self.db:
+            self._sync_from_db()
+        for e in self.manifest:                                        # older manifests: add the new fields
+            e.setdefault("tags", []); e.setdefault("groups", [])
         if not self.manifest and seed_dir and seed_dir.exists():       # first run: import the original docs/
             for f in sorted(seed_dir.iterdir()):
                 if f.suffix.lower() in ALLOWED:
                     self._add(f.name, f.read_bytes(), seeded=True)
         for e in self.manifest:                                        # resume unfinished work after a restart
             if e["status"] == "processing":
-                self.queue.append(e["uid"])
+                if e["uid"] not in self.queue:
+                    self.queue.append(e["uid"])
+            elif e["status"] == "ready" and not (self.pages / e["uid"] / "p001.jpg").exists():
+                self.queue.append("img:" + e["uid"])                   # page images lost (new server): redraw
+            elif e["status"] == "ready" and e["ext"] == ".pdf" and not (self.pages / e["uid"] / "figures.json").exists():
+                self.queue.append("fig:" + e["uid"])                   # older upload: cut out its diagrams/tables
         self._save_manifest()
         threading.Thread(target=self._worker, daemon=True).start()
         self.request_rebuild()
@@ -216,7 +273,7 @@ class Store:
         with self.lock:
             return [dict(e) for e in self.manifest]
 
-    def add(self, filename, data):
+    def add(self, filename, data, tags=None, groups=None):
         ext = Path(filename).suffix.lower()
         if ext not in ALLOWED:
             raise ValueError(f"{filename}: only PDF, DOCX and TXT files are allowed")
@@ -229,7 +286,7 @@ class Store:
             dup = next((e for e in self.manifest if e.get("sha256") == digest), None)
         if dup:
             raise ValueError(f"{filename}: already uploaded as \"{dup['name']}\"")
-        return self._add(filename, data)
+        return self._add(filename, data, tags=tags, groups=groups)
 
     def delete(self, uid):
         with self.lock:
@@ -245,6 +302,8 @@ class Store:
         with self.lock:
             self.revs.pop(uid, None)
         (self.revs_dir / f"{uid}.json").unlink(missing_ok=True)
+        if self.db:
+            self.db.delete_doc(uid)
         self.request_rebuild()
         return True
 
@@ -311,6 +370,8 @@ class Store:
             tmp = self.revs_dir / f"{uid}.tmp"
             tmp.write_text(json.dumps(r, indent=1), "utf-8")
             tmp.replace(self.revs_dir / f"{uid}.json")
+            if self.db:
+                self.db.put_revision(uid, r)
         self.request_rebuild()
         return rec
 
@@ -323,15 +384,84 @@ class Store:
                 f = self.revs_dir / f"{u}.json"
                 if f.exists():
                     f.replace(self.revs_dir / f"{u}.{int(time.time())}.bak")
+                if self.db:
+                    self.db.delete_revision(u)
         self.request_rebuild()
         return uids
+
+    # ---------- database sync (Neon / Postgres)
+    def _sync_from_db(self):
+        """The database is the source of truth: bring missing files/texts back onto this (possibly new) disk."""
+        try:
+            remote = self.db.list_docs()
+        except Exception as ex:
+            print(f"[db] cannot read documents, using local files: {ex}", flush=True)
+            self.db = None
+            return
+        if not remote and self.manifest:                       # first time with a database: upload local docs
+            print(f"[db] copying {len(self.manifest)} local documents into the database...", flush=True)
+            for e in self.manifest:
+                f = self.files / f"{e['uid']}{e['ext']}"
+                if f.exists():
+                    self.db.put_doc(e, f.read_bytes())
+                    t = self.pages / e["uid"] / "text.json"
+                    if t.exists():
+                        self.db.put_texts(e["uid"], json.loads(t.read_text("utf-8")))
+            for uid, r in self.revs.items():
+                self.db.put_revision(uid, r)
+            return
+        if remote:
+            self.manifest = remote
+            for e in self.manifest:
+                f = self.files / f"{e['uid']}{e['ext']}"
+                if not f.exists():
+                    data = self.db.doc_data(e["uid"])
+                    if data:
+                        f.write_bytes(data)
+                t = self.pages / e["uid"] / "text.json"
+                if e["status"] == "ready" and not t.exists():
+                    texts = self.db.texts(e["uid"])
+                    if texts is not None:
+                        t.parent.mkdir(parents=True, exist_ok=True)
+                        t.write_text(json.dumps(texts), "utf-8")
+                    else:
+                        e["status"] = "processing"
+            self.revs = self.db.revisions() or self.revs
+            print(f"[db] {len(self.manifest)} documents loaded from the database", flush=True)
+
+    def update_meta(self, uid, **fields):
+        """Change title / tags (machine ids) / groups (who may see it) of a document."""
+        with self.lock:
+            e = next((x for x in self.manifest if x["uid"] == uid), None)
+            if not e:
+                return None
+            for k in ("title", "tags", "groups"):
+                if fields.get(k) is not None:
+                    e[k] = fields[k]
+            self._save_manifest()
+            out = dict(e)
+        if self.db:
+            self.db.put_doc(out)
+        self.request_rebuild()
+        return out
+
+    def figures(self, uid):
+        f = self.pages / uid / "figures.json"
+        try:
+            return json.loads(f.read_text("utf-8")) if f.exists() else []
+        except ValueError:
+            return []
+
+    def figure_image(self, uid, file):
+        p = self.pages / uid / file
+        return p if re.fullmatch(r"fig_p\d{3}_\d+\.jpg", file) and p.exists() else None
 
     def request_rebuild(self):
         self.queue.append("__rebuild__")
         self.wake.set()
 
     # ---------- internals
-    def _add(self, filename, data, seeded=False):
+    def _add(self, filename, data, seeded=False, tags=None, groups=None):
         uid = uuid.uuid4().hex[:12]
         ext = Path(filename).suffix.lower()
         name = safe_name(filename)
@@ -340,10 +470,14 @@ class Store:
                  "title": pretty_title(name), "pages": 0, "status": "processing", "error": "",
                  "uploaded": datetime.now(timezone.utc).isoformat(timespec="seconds"), "seed": seeded,
                  "sha256": hashlib.sha256(data).hexdigest()}
+        entry.update(tags=list(tags or []), groups=list(groups or []))     # set before indexing: never briefly public
         with self.lock:
             self.manifest.append(entry)
             self._save_manifest()
-        self.queue.append(uid)
+        if self.db:
+            self.db.put_doc(entry, data)
+        if uid not in self.queue:
+            self.queue.append(uid)
         self.wake.set()
         return entry
 
@@ -358,8 +492,15 @@ class Store:
             self.wake.clear()
             while self.queue:
                 job = self.queue.pop(0)
-                if job != "__rebuild__":
-                    self._process(job)
+                try:                                  # one failing job (e.g. database offline) must not kill the worker
+                    if job.startswith("img:"):
+                        self._process(job[4:], images_only=True)
+                    elif job.startswith("fig:"):
+                        self._figures_only(job[4:])
+                    elif job != "__rebuild__":
+                        self._process(job)
+                except Exception as ex:
+                    print(f"[index] job {job} failed: {ex}", flush=True)
             try:
                 self.state = "indexing"
                 self._rebuild()
@@ -367,12 +508,34 @@ class Store:
                 print(f"[index] rebuild failed: {ex}", flush=True)
             self.state = "idle"
 
-    def _process(self, uid):
+    def _figures_only(self, uid):
+        e = self.doc_entry(uid)
+        if not e:
+            return
+        try:
+            import pymupdf
+            figs = []
+            with pymupdf.open(self.files / f"{uid}{e['ext']}") as doc:
+                for i, page in enumerate(doc):
+                    figs += _page_figures(page, i + 1, self.pages / uid)
+            (self.pages / uid / "figures.json").write_text(json.dumps(figs), "utf-8")
+            print(f"[figures] {e['name']}: {len(figs)} diagrams/tables cut out", flush=True)
+        except Exception as ex:
+            print(f"[figures] {e['name']}: {ex}", flush=True)
+
+    def _process(self, uid, images_only=False):
         with self.lock:
             e = next((x for x in self.manifest if x["uid"] == uid), None)
         if not e:
             return
         t0 = time.time()
+        if images_only:                                   # text already known; only page images were missing
+            try:
+                extract(self.files / f"{uid}{e['ext']}", e["ext"], self.pages / uid, e["title"])
+                print(f"[index] {e['name']}: page images redrawn in {time.time() - t0:.1f}s", flush=True)
+            except Exception as ex:
+                print(f"[index] {e['name']}: redraw failed: {ex}", flush=True)
+            return
         try:
             texts = extract(self.files / f"{uid}{e['ext']}", e["ext"], self.pages / uid, e["title"])
             (self.pages / uid / "text.json").write_text(json.dumps(texts), "utf-8")
@@ -380,11 +543,20 @@ class Store:
             e.update(pages=len(texts), status="ready" if words else "error",
                      error="" if words else "No text found (scanned PDF? OCR is not supported yet)")
             print(f"[index] {e['name']}: {len(texts)} pages, {words} words in {time.time() - t0:.1f}s", flush=True)
+            if self.db and words:
+                self.db.put_texts(uid, texts)
         except Exception as ex:
             e.update(status="error", error=str(ex)[:300])
             print(f"[index] {e['name']} FAILED: {ex}", flush=True)
         with self.lock:
+            if e not in self.manifest:                    # deleted while it was being read: do not bring it back
+                return
             self._save_manifest()
+        if self.db:
+            try:
+                self.db.put_doc(dict(e))
+            except Exception as ex:
+                print(f"[db] could not save {e['name']}: {ex}", flush=True)
 
     def _rebuild(self):
         with self.lock:
@@ -397,8 +569,13 @@ class Store:
                 if 1 <= int(pno) <= len(texts):
                     texts[int(pno) - 1] = pr["text"]
             e["_revn"] = len(rev.get("history", []))
+            figs = {}
+            for fg in self.figures(e["uid"]):
+                figs.setdefault(str(fg["page"]), []).append({"k": fg["k"], "kind": fg["kind"], "file": fg["file"],
+                                                             "caption": fg["caption"], "w": fg["w"], "h": fg["h"]})
             index_docs.append({"id": pos, "file": e["name"], "title": e["title"], "pages": len(texts),
-                               "type": e["type"], "uid": e["uid"], "rev": rev.get("version", "1.0")})
+                               "type": e["type"], "uid": e["uid"], "rev": rev.get("version", "1.0"),
+                               "tags": e.get("tags", []), "groups": e.get("groups", []), "figs": figs})
             for pno, t in enumerate(texts, start=1):
                 for c in chunk_page(t):
                     chunks.append({"doc": pos, "page": pno, "text": c})
@@ -424,8 +601,12 @@ class Store:
         matrix = self._embeddings(docs, chunks, chunk_doc_uid)
         (self.root / "index.json").write_text(json.dumps(index, ensure_ascii=False), "utf-8")
         with self.lock:
+            keys, seen = [], {}
+            for u in chunk_doc_uid:                       # (uid, n-th chunk of that doc) <-> pgvector rows
+                keys.append((u, seen.get(u, 0))); seen[u] = seen.get(u, 0) + 1
             self.snapshot = {"version": version, "index": index, "vocab": vidx, "matrix": matrix,
-                             "uids": [d["uid"] for d in docs]}
+                             "uids": [d["uid"] for d in docs], "keys": keys,
+                             "keyidx": {k: i for i, k in enumerate(keys)}}
         print(f"[index] ready: {len(docs)} docs, {n} chunks, embeddings {'yes' if matrix is not None else 'no'}", flush=True)
 
     def _embeddings(self, docs, chunks, chunk_doc_uid):
@@ -435,14 +616,35 @@ class Store:
         tag = self.model_name.replace("/", "_")
         parts = []
         for e in docs:
-            texts = [c["text"] for c, u in zip(chunks, chunk_doc_uid) if u == e["uid"]]
+            mine = [(c["page"], c["text"]) for c, u in zip(chunks, chunk_doc_uid) if u == e["uid"]]
+            texts = [t for _, t in mine]
+            sig = hashlib.sha1("\x00".join(texts).encode("utf-8")).hexdigest()   # changes when a page is revised
             f = self.emb / (f"{e['uid']}_{tag}.npy" if not e.get("_revn") else f"{e['uid']}_{tag}_r{e['_revn']}.npy")
             m = np.load(f) if f.exists() else None
+            if (m is None or m.shape[0] != len(texts)) and self.db:      # another server already embedded it
+                try:
+                    if self.db.kv_get("embsig", f"{e['uid']}:{tag}") == sig:
+                        m = self.db.get_matrix(e["uid"], self.model_name, len(texts))
+                except Exception as ex:
+                    print(f"[db] embeddings read failed: {ex}", flush=True)
             if m is None or m.shape[0] != len(texts):
                 m = np.array(list(self.embedder.passage_embed(texts, batch_size=32)), dtype=np.float32) if texts \
                     else np.zeros((0, 384), dtype=np.float32)
                 if len(m):
                     m /= np.linalg.norm(m, axis=1, keepdims=True)
-                np.save(f, m)
+                if self.db:
+                    try:
+                        self.db.put_chunks(e["uid"], self.model_name, mine, m)
+                        self.db.kv_put("embsig", f"{e['uid']}:{tag}", sig)
+                    except Exception as ex:
+                        print(f"[db] embeddings write failed: {ex}", flush=True)
+            elif self.db:
+                try:                                      # make sure pgvector has this document's chunks
+                    if self.db.kv_get("embsig", f"{e['uid']}:{tag}") != sig:
+                        self.db.put_chunks(e["uid"], self.model_name, mine, m)
+                        self.db.kv_put("embsig", f"{e['uid']}:{tag}", sig)
+                except Exception as ex:
+                    print(f"[db] embeddings sync failed: {ex}", flush=True)
+            np.save(f, m)
             parts.append(m)
         return np.vstack(parts) if parts else None

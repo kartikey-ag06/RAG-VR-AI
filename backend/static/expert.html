@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VR_RAG - Remote expert</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --bad:#e5596b; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width:1280px; margin:0 auto; padding:22px 20px 40px; }
+  h1 { margin:0 0 4px; font-size:22px; } h1 span { color:var(--accent); } .sub { color:var(--muted); margin-bottom:16px; }
+  button, input { border:1px solid var(--line); background:#1a2540; color:var(--text); padding:7px 12px; border-radius:8px; font:inherit; font-size:13px; }
+  button { cursor:pointer; } button.go { background:var(--ok); border-color:var(--ok); color:#04150b; font-weight:600; } button.bad { background:var(--bad); border-color:var(--bad); color:#fff; }
+  .grid { display:grid; grid-template-columns: 1.6fr 1fr; gap:16px; } @media (max-width:950px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  video { width:100%; background:#000; border-radius:10px; aspect-ratio:16/10; object-fit:contain; }
+  .room { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .muted { color:var(--muted); font-size:12px; } .ctx { white-space:pre-wrap; font-size:13px; max-height:260px; overflow:auto; }
+  #chat { height:220px; overflow:auto; background:#0b101c; border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px; }
+  #chat .w { color:#ffd98a; } #chat .e { color:#9fd0ff; }
+  .row { display:flex; gap:6px; } .row input { flex:1; }
+  #state { font-size:12px; color:var(--muted); margin-top:6px; }
+</style>
+<link rel="stylesheet" href="/theme/vr-theme.css">
+<script src="/theme/vr-shell.js" defer></script>
+</head>
+<body>
+<main>
+  <h1><span>Remote expert</span> console</h1>
+  <div class="sub">A worker wearing the glasses can escalate a problem. You see their view, hear them, read what the AI already told them, and guide them by voice and chat.</div>
+  <div class="grid">
+    <div>
+      <div class="card"><h2>Worker's view</h2><video id="remote" autoplay playsinline></video><div id="state">Not connected. Pick a call on the right.</div>
+        <div class="row" style="margin-top:8px"><button id="mute">🎙 Mute me</button><button id="hang" class="bad" disabled>End call</button></div></div>
+      <div class="card"><h2>Chat <span class="muted">(messages appear in the worker's glasses)</span></h2><div id="chat"></div>
+        <div class="row"><input id="msg" placeholder="Type a tip, e.g. 'Check the strainer S-1 first'"><button id="send">Send</button></div></div>
+    </div>
+    <div>
+      <div class="card"><h2>Waiting calls</h2><div id="rooms"><div class="muted">No calls yet.</div></div></div>
+      <div class="card"><h2>What the AI told the worker</h2><div id="ctx" class="ctx muted">-</div></div>
+    </div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all', turn: false };
+// STUN + TURN relay from the server (TURN = calls also work through office / mobile networks)
+fetch('/api/expert/ice').then((r) => r.json()).then((j) => { if (j.iceServers) ICE = j; }).catch(() => {});
+let room = null, pc = null, since = 0, timer = null, mic = null;
+
+async function send(type, data) {
+  await fetch(`/api/expert/${room}/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'expert', type, data }) });
+}
+function chat(who, text) { const d = document.createElement('div'); d.className = who === 'worker' ? 'w' : 'e'; d.textContent = (who === 'worker' ? 'Worker: ' : 'You: ') + text; $('chat').appendChild(d); $('chat').scrollTop = 1e9; }
+function showCtx(c) { $('ctx').textContent = Object.entries(c || {}).map(([k, v]) => `${k.toUpperCase()}: ${v}`).join('\n\n') || '-'; }
+
+async function listRooms() {
+  const r = await (await fetch('/api/expert/rooms', { cache: 'no-store' })).json();
+  $('rooms').innerHTML = r.rooms.length ? r.rooms.map((x) => `<div class="room"><div><b>${esc((x.context.question || 'Call').slice(0, 70))}</b>
+      <div class="muted">${new Date(x.created * 1000).toLocaleTimeString()} · ${x.status}${x.context.machine ? ' · ' + esc(x.context.machine) : ''}</div></div>
+      <button class="go" data-join="${x.id}" ${room === x.id ? 'disabled' : ''}>${room === x.id ? 'Joined' : 'Join'}</button></div>`).join('')
+    : '<div class="muted">No calls yet.</div>';
+}
+
+async function join(id) {
+  if (pc) hangup(false);
+  room = id; since = 0; $('chat').innerHTML = '';
+  const info = await (await fetch('/api/expert/' + id)).json(); showCtx(info.context);
+  pc = new RTCPeerConnection({ iceServers: ICE.iceServers, iceTransportPolicy: ICE.iceTransportPolicy });
+  try { mic = await navigator.mediaDevices.getUserMedia({ audio: true }); mic.getTracks().forEach((t) => pc.addTrack(t, mic)); }
+  catch { $('state').textContent = 'Microphone blocked - the worker will not hear you (chat still works).'; }
+  pc.ontrack = (e) => { $('remote').srcObject = e.streams[0]; };
+  pc.onicecandidate = (e) => { if (e.candidate) send('ice', e.candidate.toJSON()); };
+  pc.onconnectionstatechange = () => { $('state').textContent = 'Connection: ' + pc.connectionState + (pc.connectionState === 'failed' ? (ICE.turn ? ' (even the TURN relay could not be reached - check its address and login)' : ' (this network blocks direct calls: ask the admin to set a TURN relay server)') : '') + (pc.connectionState === 'connected' && ICE.turn ? ' · relay available' : ''); };
+  $('hang').disabled = false;
+  await send('hello', { name: 'Expert' });
+  $('state').textContent = 'Asking the worker\'s glasses to connect...';
+  clearInterval(timer); timer = setInterval(poll, 800); listRooms();
+}
+
+async function poll() {
+  if (!room) return;
+  const r = await (await fetch(`/api/expert/${room}/poll?me=expert&since=${since}`, { cache: 'no-store' })).json().catch(() => null);
+  if (!r) return;
+  for (const m of r.msgs) {
+    since = Math.max(since, m.n);
+    if (m.type === 'offer') {
+      await pc.setRemoteDescription(m.data);
+      const ans = await pc.createAnswer(); await pc.setLocalDescription(ans);
+      await send('answer', pc.localDescription.toJSON());
+    } else if (m.type === 'ice') { try { await pc.addIceCandidate(m.data); } catch {} }
+    else if (m.type === 'chat') chat('worker', m.data.text);
+    else if (m.type === 'context') showCtx(m.data);
+    else if (m.type === 'end') { $('state').textContent = 'The worker ended the call.'; hangup(false); }
+  }
+}
+
+function hangup(notify = true) {
+  if (notify && room) fetch(`/api/expert/${room}/end`, { method: 'POST' });
+  clearInterval(timer);
+  if (pc) pc.close(); pc = null;
+  if (mic) mic.getTracks().forEach((t) => t.stop()); mic = null;
+  $('remote').srcObject = null; $('hang').disabled = true; room = null; listRooms();
+}
+$('rooms').onclick = (e) => { const b = e.target.closest('[data-join]'); if (b) join(b.dataset.join); };
+$('hang').onclick = () => hangup(true);
+$('mute').onclick = () => { if (!mic) return; const t = mic.getAudioTracks()[0]; t.enabled = !t.enabled; $('mute').textContent = t.enabled ? '🎙 Mute me' : '🔇 Unmute'; };
+const sendChat = () => { const t = $('msg').value.trim(); if (!t || !room) return; send('chat', { text: t }); chat('expert', t); $('msg').value = ''; };
+$('send').onclick = sendChat; $('msg').onkeydown = (e) => { if (e.key === 'Enter') sendChat(); };
+const q = new URLSearchParams(location.search).get('room');
+listRooms().then(() => { if (q) join(q); });
+setInterval(() => { if (!room && !document.hidden) listRooms(); }, 5000);   // waiting for a call: check every 5 s
+</script>
+</body>
+</html>
