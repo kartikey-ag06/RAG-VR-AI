@@ -118,6 +118,8 @@ def register(app, store, llm, root: Path, auth=None):
     # ---------- 1. Run: the glasses log each question (fire-and-forget from the app)
     @app.post("/api/procops/event")
     def procops_event(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first (paste your access token in Settings)"}, 401)
         try:
             b = (_body if _body is not None else {})
         except ValueError:

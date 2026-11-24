@@ -72,6 +72,8 @@ def register(app, kv, llm, search, store, connectors, root, auth):
     # ---------- guided workflows
     @app.post("/api/workflows/generate")
     def wf_generate(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first: this uses the AI (paste your access token in Settings)"}, 401)
         b = (_body if _body is not None else {})
         topic = str(b.get("topic", "")).strip()[:300]
         machine = str(b.get("machine", "") or "")[:80]
@@ -292,6 +294,8 @@ def register(app, kv, llm, search, store, connectors, root, auth):
 
     @app.post("/api/pins")
     def pin_add(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first (paste your access token in Settings)"}, 401)
         b = (_body if _body is not None else {})
         kind = str(b.get("kind", "page"))
         if kind not in ("page", "answer", "figure", "note", "step"):
