@@ -100,6 +100,7 @@ A voice-first Augmented Reality (AR/VR) Retrieval-Augmented Generation (RAG) ass
 | **Phase 6: ProcOps & App Multitasking** | ✅ Completed | Friction heatmap dashboard, AI revision editor, in-VR floating app window mirrors. |
 | **Phase 7: Meta-Glasses Parity + Enterprise** | ✅ Completed | Wake word, captions/translation, HUD, Live AI, reminders/weather, camera + filters, Visual-to-RAG, workflows, pins, exports, remote expert, MCP, connectors, RBAC, Neon pgvector. |
 | **Phase 8: Talk, Meet, Move + limits fixed** | ✅ Completed | Teleprompter, meeting notes, hand gestures, directions, calendar sync, recording light, TURN relay, SharePoint / Drive / Confluence / Notion connectors, non-Chrome voice. |
+| **Phase 9: Multi-glasses ("one brain, many doors")** | ✅ Completed | Versioned `/api/v1` (ask, stream, search, scan, pages), MCP on the same pipeline (+ page images, spoken style), `/hud` 600x600 Meta Ray-Ban Display app with WebMCP voice tools, WebXR app on `/api/v1`. See `GLASSES_INTEGRATION.md`. |
 
 ---
 

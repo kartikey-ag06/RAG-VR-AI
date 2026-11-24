@@ -18,6 +18,8 @@ services:
         sync: false
       - key: MCP_TOKEN
         sync: false
+      - key: PUBLIC_URL
+        sync: false
       - key: TURN_URLS
         sync: false
       - key: TURN_SECRET

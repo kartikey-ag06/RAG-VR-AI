@@ -113,6 +113,11 @@ Then type or speak a question, or just press **Enter** ("What is this, and what 
 - Windows are **mirrors (view only)**: WhatsApp/Instagram/Gmail block being embedded in other pages, so you reply/click in the real tab. Code: `glasses_app/src/apps.js`.
 
 
+## Connect real glasses (Phase 9)
+One backend, many doors: `/api/v1` for every client, `/mcp` for Meta AI Connectors and other AI assistants,
+`/hud` for Meta Ray-Ban Display (WebMCP voice tools), and the WebXR app for VR headsets.
+Setup for each kind of glasses: **[GLASSES_INTEGRATION.md](GLASSES_INTEGRATION.md)**.
+
 ## Phase 7: Meta-glasses features + enterprise toolkit
 Panel tabs in the glasses app: **🎤 Ask** (voice, scan, photo, apps) · **🛠 Tools** · **⚙ Settings**.
 | You say / press | What happens |

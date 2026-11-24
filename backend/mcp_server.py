@@ -3,11 +3,14 @@ mcp_server.py - your documents as an MCP tool server, so other AI assistants (Cl
 IDE agents...) can search them directly.
 
 Transport: MCP "Streamable HTTP" at POST /mcp (JSON-RPC 2.0, JSON responses).
-Tools: list_documents, search_documents, get_page, ask_documents.
+Tools: list_documents, search_documents, get_page, get_page_image, ask_documents.
+Answers come from the same pipeline as /api/v1 (api_v1.py), so Meta AI, Claude and the glasses all get the same answer.
+PUBLIC_URL (environment, e.g. https://vr-rag-backend.onrender.com) makes page-image links absolute.
 Security: set MCP_TOKEN (environment) and clients must send  Authorization: Bearer <MCP_TOKEN>.
 Without MCP_TOKEN the endpoint only answers requests from this computer.
 """
 from net import HTTP, JSONB
+import base64
 import json
 import os
 import secrets
@@ -29,14 +32,24 @@ TOOLS = [
     {"name": "get_page", "description": "Full text of one page of a document.",
      "inputSchema": {"type": "object", "required": ["doc_uid", "page"], "properties": {
          "doc_uid": {"type": "string"}, "page": {"type": "integer"}}}},
+    {"name": "get_page_image",
+     "description": "Picture of one document page (JPEG, sized for small glasses displays) plus its link.",
+     "inputSchema": {"type": "object", "required": ["doc_uid", "page"], "properties": {
+         "doc_uid": {"type": "string"}, "page": {"type": "integer"},
+         "width": {"type": "integer", "description": "Image width in pixels (200-1600). Default 600."}}}},
     {"name": "ask_documents",
-     "description": "Answer a question from the VR_RAG documents only, with citations [n] to document pages.",
+     "description": "Answer a question from the VR_RAG documents, with citations [n] to document pages. "
+                    "Use style 'spoken' when the answer will be read aloud on glasses.",
      "inputSchema": {"type": "object", "required": ["question"], "properties": {
-         "question": {"type": "string"}, "machine_id": {"type": "string"}}}},
+         "question": {"type": "string"}, "machine_id": {"type": "string"},
+         "style": {"type": "string", "description": "full (default), glance (3 short points) or spoken (1-2 sentences)"},
+         "lang": {"type": "string", "description": "Answer language, e.g. Hindi. Default English."}}}},
 ]
+for _t in TOOLS:                                     # every tool only reads: lets clients skip confirmation prompts
+    _t["annotations"] = {"readOnlyHint": True, "openWorldHint": False}
 
 
-def register(app, store, search, llm, auth):
+def register(app, store, search, llm, auth, core=None):
     def allowed(req):
         tok = os.environ.get("MCP_TOKEN", "")
         if tok:
@@ -53,7 +66,7 @@ def register(app, store, search, llm, auth):
                         "score": round(h["score"], 4), "semantic": None if h.get("sem") is None else round(h["sem"], 3)})
         return out, res
 
-    def call_tool(name, a):
+    def call_tool(name, a, base=""):
         if name == "list_documents":
             docs = [{"doc_uid": d["uid"], "title": d["title"], "pages": d["pages"], "type": d["type"], "machine_ids": d.get("tags", [])}
                     for d in store.snapshot["index"]["docs"] if not d.get("groups")]
@@ -69,6 +82,38 @@ def register(app, store, search, llm, auth):
             if t is None:
                 raise ValueError("page not found")
             return f"{e['title']} - page {a.get('page')}\n\n{t}"
+        if name == "get_page_image":
+            uid, page = str(a.get("doc_uid", "")), int(a.get("page", 1))
+            e = store.doc_entry(uid)
+            if not e or e.get("groups"):
+                raise ValueError("document not found")
+            p = store.page_image_uid(uid, page)
+            if not p:
+                raise ValueError("page not found")
+            w = max(200, min(1600, int(a.get("width") or 600)))
+            from io import BytesIO
+            from PIL import Image
+            with Image.open(p) as im:
+                im = im.convert("RGB")
+                if im.width > w:
+                    im = im.resize((w, max(1, round(im.height * w / im.width))), Image.LANCZOS)
+                buf = BytesIO()
+                im.save(buf, "JPEG", quality=80, optimize=True)
+            link = f"{base}/api/v1/documents/{uid}/pages/{page}.jpg?w={w}"
+            return [{"type": "text", "text": f"{e['title']} - page {page}\n{link}"},
+                    {"type": "image", "data": base64.b64encode(buf.getvalue()).decode(), "mimeType": "image/jpeg"}]
+        if name == "ask_documents" and core:
+            q = str(a.get("question", "")).strip()[:1000]
+            if not q:
+                raise ValueError("question is required")
+            style = str(a.get("style") or "full").lower()
+            out = core["answer"](q, a.get("machine_id"), style if style in ("full", "glance", "spoken") else "full",
+                                 str(a.get("lang") or "")[:30], None)
+            refs = "\n".join(f"[{c['n']}] {c['title']}, page {c['page']} (doc_uid {c['doc_uid']}) {base}{c['image_url']}"
+                             for c in out["citations"])
+            label = {"pdf": "From the documents", "general": "General knowledge (not in the documents)",
+                     "offline": "Best matching text (no AI on the server)"}.get(out["mode"], out["mode"])
+            return f"{out['answer']}\n\n{label}" + (f"\nSources:\n{refs}" if refs else "")
         if name == "ask_documents":
             ps, res = passages(a.get("question", ""), 6, a.get("machine_id"))
             if not ps:
@@ -81,7 +126,7 @@ def register(app, store, search, llm, auth):
             return f"{ans.strip()}\n\nSources:\n{refs}"
         raise ValueError(f"unknown tool {name}")
 
-    def handle(msg):
+    def handle(msg, base=""):
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
             return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
         mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
@@ -93,7 +138,7 @@ def register(app, store, search, llm, auth):
             v = params.get("protocolVersion")
             return ok({"protocolVersion": v if v in VERSIONS else VERSIONS[0],
                        "capabilities": {"tools": {"listChanged": False}},
-                       "serverInfo": {"name": "vr-rag", "version": "1.0"},
+                       "serverInfo": {"name": "vr-rag", "version": "1.1"},
                        "instructions": "Search and cite the VR_RAG document library (manuals, SOPs, orders)."})
         if method == "ping":
             return ok({})
@@ -101,8 +146,9 @@ def register(app, store, search, llm, auth):
             return ok({"tools": TOOLS})
         if method == "tools/call":
             try:
-                text = call_tool(params.get("name"), params.get("arguments") or {})
-                return ok({"content": [{"type": "text", "text": text}], "isError": False})
+                out = call_tool(params.get("name"), params.get("arguments") or {}, base)
+                content = out if isinstance(out, list) else [{"type": "text", "text": out}]
+                return ok({"content": content, "isError": False})
             except Exception as e:
                 return ok({"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
         return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
@@ -114,10 +160,11 @@ def register(app, store, search, llm, auth):
         body = _body
         if body is None:
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
+        base = (os.environ.get("PUBLIC_URL") or str(req.base_url)).rstrip("/")
         if isinstance(body, list):
-            out = [r for r in (handle(m) for m in body) if r is not None]
+            out = [r for r in (handle(m, base) for m in body) if r is not None]
             return JSONResponse(out) if out else Response(status_code=202)
-        r = handle(body)
+        r = handle(body, base)
         if r is None:
             return Response(status_code=202)
         headers = {}

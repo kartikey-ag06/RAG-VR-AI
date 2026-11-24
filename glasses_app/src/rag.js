@@ -345,12 +345,29 @@ export async function transcribe(blob, lang = "", hint = "") {
 // ---------------- Hybrid search on the Python backend ----------------
 /** Asks the Python backend (embeddings + TF-IDF). Returns hits in the same shape as RagIndex.search,
  *  or null when the backend is not there (PowerShell server / offline) so the caller can fall back. */
+/** /api/v1/search (the shared API every glasses client uses), returned in the old /api/search shape.
+ *  null = this server has no /api/v1 (then the caller falls back to /api/search). */
+async function searchV1(query, k, machine) {
+  const r = await fetch(apiUrl("/api/v1/search"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ query, k, machine_id: machine }), signal: AbortSignal.timeout(10000) });
+  if (r.status === 404 || r.status === 405) { v1Ok = false; return null; }
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const j = await r.json();
+  return { mode: j.mode, version: j.index_version, conf: j.confidence, lowConfidence: j.low_confidence,
+    machine: j.machine, machineMatched: j.machine_matched, engine: j.engine,
+    hits: (j.passages || []).map((p) => ({ i: p.i, score: p.score, sem: p.semantic, kw: p.keyword })) };
+}
+
+let v1Ok = true;            // false after a 404: older server without /api/v1 -> keep using /api/search
 export async function serverSearch(index, query, k = 8, machine = "") {
   try {
-    const r = await fetch(apiUrl("/api/search"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ query, k, machine }), signal: AbortSignal.timeout(10000) });
-    if (!r.ok) return null;
-    const j = await r.json();
+    let j = v1Ok ? await searchV1(query, k, machine) : null;
+    if (!j) {
+      const r = await fetch(apiUrl("/api/search"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ query, k, machine }), signal: AbortSignal.timeout(10000) });
+      if (!r.ok) return null;
+      j = await r.json();
+    }
     const hits = (j.hits || []).map((h) => {
       const chunk = index.data.chunks[h.i];
       return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw };
