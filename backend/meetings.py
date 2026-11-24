@@ -78,6 +78,8 @@ def register(app, kv, llm, search, auth):
     # ------------------------------------------------------------ meetings
     @app.post("/api/meetings")
     def start(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first (paste your access token in Settings)"}, 401)
         b = _body or {}
         m = {"id": secrets.token_hex(5), "title": str(b.get("title") or "Meeting")[:120], "lang": str(b.get("lang") or "")[:10],
              "started": _now(), "t0": time.time(), "segments": [], "status": "recording", "summary": None,
@@ -213,6 +215,8 @@ def register(app, kv, llm, search, auth):
     # ------------------------------------------------------------ teleprompter
     @app.post("/api/teleprompter/script")
     def make_script(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first: this uses the AI (paste your access token in Settings)"}, 401)
         b = _body or {}
         topic = str(b.get("topic", "")).strip()[:300]
         if not topic:

@@ -21,6 +21,9 @@ Embeddings
 Run:  START_VR_RAG.bat   (or: python backend/app.py)
 """
 from net import HTTP, JSONB
+import limits
+from limits import LoadGuard
+log = limits.log
 from starlette.concurrency import run_in_threadpool
 import json
 import math
@@ -32,6 +35,7 @@ import threading
 import time
 import webbrowser
 from collections import Counter, OrderedDict
+import gzip
 import hashlib
 from pathlib import Path
 
@@ -57,6 +61,11 @@ W_SEMANTIC = 1.0      # weight of the embedding ranking
 W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "13,00,00,000")
 
 app = FastAPI(title="VR_RAG backend")
+limits.setup_logging()
+
+# Load protection (rate limits, body-size limits, AI budget + concurrency, request ids). Added BEFORE CORS so CORS
+# stays the outermost layer: a 429 / 413 answer still carries CORS headers and the browser can show its message.
+app.add_middleware(LoadGuard)
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,7 +73,15 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After", "X-Request-ID", "ETag"],
+    max_age=600,
 )
+
+
+@app.get("/healthz")
+def healthz():
+    """Cheap liveness check for Render / uptime monitors: no disk, no database, no AI."""
+    return {"ok": True}
 
 
 @app.on_event("startup")
@@ -214,7 +231,10 @@ def run_search(query, k=8, machine="", user=None):
 @app.post("/api/search")
 def search(req: Request, _body=JSONB):
     body = (_body if _body is not None else {})
-    k = max(1, min(20, int(body.get("k", 8))))
+    try:
+        k = max(1, min(20, int(body.get("k", 8))))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "'k' must be a whole number"}, 400)
     return run_search(str(body.get("query", "")).strip(), k,
                       str(body.get("machine", "") or "")[:80], AUTH.user_of(req))
 
@@ -323,27 +343,41 @@ def index_version():
 
 
 _ix_cache = {}
+_ix_lock = threading.Lock()
 
 
 @app.get("/rag/index.json")
 def rag_index(req: Request):
+    """The search index the glasses load (about 1.5 MB). Built once per (version, visible docs), kept gzip-compressed
+    (about 0.4 MB on the wire), and answered with 304 Not Modified when the glasses already have this version."""
     snap = STORE.snapshot
-    if not AUTH.enabled:
-        return Response(json.dumps(snap["index"], ensure_ascii=False), media_type="application/json", headers=NO_CACHE)
-    user = AUTH.user_of(req)
-    ok = set(visible_positions(snap, user))
-    key = (snap["version"], tuple(sorted(ok)))
-    body = _ix_cache.get(key)
-    if body is None:                # same doc positions for everyone; hidden docs are emptied, not removed
-        ix = dict(snap["index"])
-        ix["docs"] = [d if d["id"] in ok else {"id": d["id"], "title": "(restricted)", "file": "", "pages": 0,
-                                                "type": "", "uid": "", "tags": [], "figs": {}} for d in snap["index"]["docs"]]
-        # same length as the server's list: search results are chunk positions, so hidden chunks are blanked, not removed
-        ix["chunks"] = [c if c["doc"] in ok else {"doc": c["doc"], "page": 0, "text": "", "terms": [], "weights": []}
-                        for c in snap["index"]["chunks"]]
-        body = json.dumps(ix, ensure_ascii=False)
-        _ix_cache.clear(); _ix_cache[key] = body
-    return Response(body, media_type="application/json", headers=NO_CACHE)
+    if AUTH.enabled:
+        ok = set(visible_positions(snap, AUTH.user_of(req)))
+        key = (snap["version"], tuple(sorted(ok)))
+    else:
+        ok, key = None, (snap["version"], "all")
+    entry = _ix_cache.get(key)
+    if entry is None:
+        ix = snap["index"]
+        if ok is not None:          # same doc positions for everyone; hidden docs are emptied, not removed
+            ix = dict(ix)
+            ix["docs"] = [d if d["id"] in ok else {"id": d["id"], "title": "(restricted)", "file": "", "pages": 0,
+                                                    "type": "", "uid": "", "tags": [], "figs": {}} for d in snap["index"]["docs"]]
+            # same length as the server's list: search results are chunk positions, so hidden chunks are blanked
+            ix["chunks"] = [c if c["doc"] in ok else {"doc": c["doc"], "page": 0, "text": "", "terms": [], "weights": []}
+                            for c in snap["index"]["chunks"]]
+        raw = json.dumps(ix, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        entry = {"raw": raw, "gz": gzip.compress(raw, 6), "etag": '"' + hashlib.sha1(raw).hexdigest()[:20] + '"'}
+        with _ix_lock:
+            _ix_cache[key] = entry
+            while len(_ix_cache) > 8:           # a few permission sets per version; old versions fall out
+                _ix_cache.pop(next(iter(_ix_cache)))
+    headers = {"ETag": entry["etag"], "Cache-Control": "private, no-cache", "Vary": "Accept-Encoding, X-VR-Token"}
+    if entry["etag"] in (req.headers.get("if-none-match") or ""):
+        return Response(status_code=304, headers=headers)
+    if "gzip" in (req.headers.get("accept-encoding") or ""):
+        return Response(entry["gz"], media_type="application/json", headers={**headers, "Content-Encoding": "gzip"})
+    return Response(entry["raw"], media_type="application/json", headers=headers)
 
 
 def _doc_visible(pos, req):
@@ -403,6 +437,8 @@ def list_models():
     if _MODELS["ids"] is not None and time.time() - _MODELS["t"] < 600:
         return _MODELS["ids"]
     p = provider()
+    if not p:
+        raise RuntimeError("no AI key configured (set GROQ_API_KEY or put a key in grok_api_key.txt)")
     r = HTTP.get(f"{p['base']}/models", headers={"Authorization": f"Bearer {get_key()}"}, timeout=20)
     r.raise_for_status()
     _MODELS.update(ids=[m["id"] for m in r.json().get("data", [])], t=time.time())
@@ -456,8 +492,11 @@ def status():
 def models():
     try:
         return {"data": [{"id": m} for m in list_models()]}
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=502)
+        log.warning("model list failed: %s", e)
+        return JSONResponse({"error": "could not load the model list from the AI provider"}, status_code=502)
 
 
 def fast_model():
@@ -496,6 +535,32 @@ def _remember(key, text):
             _ANSWERS.popitem(last=False)
 
 
+MAX_MESSAGES, MAX_PROMPT_CHARS = 24, 60000
+
+
+def _clean_messages(body):
+    """Only well-formed chat messages reach Groq: a list of {role, content} strings, bounded in count and size.
+    Returns (messages, error)."""
+    msgs = (body or {}).get("messages")
+    if not isinstance(msgs, list) or not msgs or len(msgs) > MAX_MESSAGES:
+        return None, f"'messages' must be a list of 1-{MAX_MESSAGES} chat messages"
+    out, total = [], 0
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant") or not isinstance(m.get("content"), str):
+            return None, "each message needs a role (system/user/assistant) and text content"
+        total += len(m["content"])
+        out.append({"role": m["role"], "content": m["content"]})
+    if total > MAX_PROMPT_CHARS:
+        return None, f"prompt too long ({total} characters, max {MAX_PROMPT_CHARS})"
+    return out, ""
+
+
+# Single flight: when the same question arrives several times at once (double tap, two workers, a retry), only the
+# first one calls Groq; the others wait for its answer instead of paying for it again.
+_INFLIGHT = {}
+_INFLIGHT_LOCK = threading.Lock()
+
+
 @app.post("/api/grok")
 def grok(req: Request, _body=JSONB):
     if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
@@ -503,23 +568,45 @@ def grok(req: Request, _body=JSONB):
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key. Put a Groq (gsk_...) or xAI (xai-...) key in grok_api_key.txt"}, 400)
-    messages = (_body or {}).get("messages", [])
+    messages, err = _clean_messages(_body)
+    if err:
+        return JSONResponse({"error": err}, 400)
     key = _cache_key(messages)
     if key in _ANSWERS:
         return {"choices": [{"message": {"role": "assistant", "content": _ANSWERS[key]}}], "cached": True}
+    with _INFLIGHT_LOCK:
+        waiter = _INFLIGHT.get(key)
+        if waiter is None:
+            _INFLIGHT[key] = threading.Event()
+    if waiter is not None:                       # same question already on its way to Groq: wait for that answer
+        waiter.wait(95)
+        if key in _ANSWERS:
+            return {"choices": [{"message": {"role": "assistant", "content": _ANSWERS[key]}}], "cached": True, "shared": True}
     try:
-        r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages),
-                      headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
-    except Exception as e:
-        return JSONResponse({"error": f"{p['name']} API: {e}"}, 502)
-    if r.status_code != 200:
-        return JSONResponse({"error": f"{p['name']} API: HTTP {r.status_code} - {r.text[:500]}"}, 502)
-    j = r.json()
-    try:
-        _remember(key, j["choices"][0]["message"]["content"] or "")
-    except Exception:
-        pass
-    return j
+        try:
+            r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages),
+                          headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
+        except Exception as e:
+            log.warning("AI provider unreachable: %s", e)
+            return JSONResponse({"error": f"{p['name']} is unreachable - try again shortly"}, 502)
+        if r.status_code == 429:
+            return JSONResponse({"error": "the AI provider is rate limiting us - try again in a minute", "retry_after": 30}, 503,
+                                headers={"Retry-After": "30"})
+        if r.status_code != 200:
+            log.warning("AI provider HTTP %s: %s", r.status_code, r.text[:300])
+            return JSONResponse({"error": f"{p['name']} API error (HTTP {r.status_code})"}, 502)
+        j = r.json()
+        try:
+            _remember(key, j["choices"][0]["message"]["content"] or "")
+        except Exception:
+            pass
+        return j
+    finally:
+        if waiter is None:
+            with _INFLIGHT_LOCK:
+                ev = _INFLIGHT.pop(key, None)
+            if ev:
+                ev.set()
 
 
 @app.post("/api/grok/stream")
@@ -530,7 +617,9 @@ def grok_stream(req: Request, _body=JSONB):
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key in grok_api_key.txt"}, 400)
-    messages = (_body or {}).get("messages", [])
+    messages, err = _clean_messages(_body)
+    if err:
+        return JSONResponse({"error": err}, 400)
     key = _cache_key(messages)
     if key in _ANSWERS:
         return Response(_ANSWERS[key], media_type="text/plain; charset=utf-8", headers={"X-Cache": "hit"})
@@ -538,11 +627,16 @@ def grok_stream(req: Request, _body=JSONB):
         r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages, stream=True), stream=True,
                       headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
     except Exception as e:
-        return JSONResponse({"error": f"{p['name']} API: {e}"}, 502)
+        log.warning("AI provider unreachable: %s", e)
+        return JSONResponse({"error": f"{p['name']} is unreachable - try again shortly"}, 502)
     if r.status_code != 200:
-        txt = r.text[:500]
+        txt = r.text[:300]
         r.close()
-        return JSONResponse({"error": f"{p['name']} API: HTTP {r.status_code} - {txt}"}, 502)
+        if r.status_code == 429:
+            return JSONResponse({"error": "the AI provider is rate limiting us - try again in a minute", "retry_after": 30}, 503,
+                                headers={"Retry-After": "30"})
+        log.warning("AI provider HTTP %s: %s", r.status_code, txt)
+        return JSONResponse({"error": f"{p['name']} API error (HTTP {r.status_code})"}, 502)
 
     r.encoding = "utf-8"            # SSE has no charset: without this, ’ “ ₹ and Hindi text arrive garbled
 
@@ -594,9 +688,13 @@ async def stt(req: Request):
                           data=dict({"model": stt_model(), "response_format": "json", "temperature": "0"},
                                     **({"language": lang} if lang else {}), **({"prompt": hint} if hint else {})), timeout=60)
     except Exception as e:
-        return JSONResponse({"error": f"groq STT: {e}"}, 502)
+        log.warning("speech-to-text unreachable: %s", e)
+        return JSONResponse({"error": "speech service unreachable - try again shortly"}, 502)
     if r.status_code != 200:
-        return JSONResponse({"error": f"groq STT: HTTP {r.status_code} - {r.text[:300]}"}, 502)
+        log.warning("speech-to-text HTTP %s: %s", r.status_code, r.text[:300])
+        if r.status_code == 429:
+            return JSONResponse({"error": "speech service is busy - try again in a minute"}, 503, headers={"Retry-After": "30"})
+        return JSONResponse({"error": f"speech service error (HTTP {r.status_code})"}, 502)
     return r.json()
 
 
@@ -610,7 +708,9 @@ def llm_complete(messages, max_tokens=1200, fast=False):
     r = HTTP.post(f"{p['base']}/chat/completions", json=payload,
                       headers={"Authorization": f"Bearer {get_key()}"}, timeout=120)
     if r.status_code != 200:
-        raise RuntimeError(f"{p['name']} API: HTTP {r.status_code} - {r.text[:300]}")
+        log.warning("AI provider HTTP %s: %s", r.status_code, r.text[:300])
+        raise RuntimeError("the AI provider is busy - try again in a minute" if r.status_code == 429
+                           else f"{p['name']} API error (HTTP {r.status_code})")
     return r.json()["choices"][0]["message"]["content"] or ""
 
 
@@ -680,7 +780,8 @@ def admin_status(req: Request):
     return {"admin": AUTH.is_admin(req), "rbac": AUTH.enabled, "protected": AUTH.admin_required(req),
             "storage": "postgres+pgvector" if DBX else "local files", "embeddings": EMB["state"],
             "mcp": {"url": "/mcp", "token_required": bool(os.environ.get("MCP_TOKEN"))},
-            "users": [AUTH.public(u) for u in AUTH.users()] if AUTH.is_admin(req) else []}
+            "users": [AUTH.public(u) for u in AUTH.users()] if AUTH.is_admin(req) else [],
+            "load": limits.snapshot() if AUTH.is_admin(req) else None}
 
 
 @app.post("/api/admin/users")
@@ -704,7 +805,7 @@ def admin_user_delete(uid: str, req: Request):
 VISION = None
 try:
     import vision
-    VISION = vision.register(app, provider, get_key, list_models, ROOT)   # "scan, then ask" (photo questions)
+    VISION = vision.register(app, provider, get_key, list_models, ROOT, AUTH)   # "scan, then ask" (photo questions)
 except Exception as _e:
     print(f"[vision] disabled: {_e}", flush=True)
 
@@ -746,7 +847,6 @@ if __name__ == "__main__":
     print(f"Search: hybrid (TF-IDF + {EMBED_MODEL}) - embeddings load in the background")
     print(f"Upload documents at http://{host}:{port}/upload  (stored in {DATA_DIR})")
     print(f"ProcOps dashboard at http://{host}:{port}/procops")
-    threading.Thread(target=load_embeddings, daemon=True).start()
     if "--no-browser" not in sys.argv and not env_port:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}/")).start()
     uvicorn.run(app, host=host, port=port, log_level="warning")

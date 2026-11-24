@@ -21,10 +21,25 @@ export function authHeaders(extra = {}) {
 }
 
 /** JSON helper for the newer modules: api("/api/notes"), api("/api/notes", {text}) -> POST */
+// ---- server load protection: after a 429 / 503 the app waits (Retry-After) instead of hammering the server
+let aiBlockedUntil = 0;
+function noteLimit(r) {
+  if (r.status === 429 || r.status === 503) {
+    const s = Number(r.headers.get("Retry-After")) || 10;
+    aiBlockedUntil = Date.now() + Math.min(s, 3600) * 1000;
+  }
+}
+function cooldownMsg() {
+  return `Too many requests - please wait ${Math.max(1, Math.ceil((aiBlockedUntil - Date.now()) / 1000))} s`;
+}
+const AI_PATHS = ["/api/grok", "/api/translate", "/api/assistant/intent", "/api/vision/", "/api/workflows/generate", "/api/teleprompter/script"];
+
 export async function api(path, body, method) {
+  if (Date.now() < aiBlockedUntil && AI_PATHS.some(p => path.startsWith(p))) throw new Error(cooldownMsg());
   const opts = { method: method || (body === undefined ? "GET" : "POST"), headers: authHeaders(body === undefined ? {} : { "Content-Type": "application/json" }) };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch(apiUrl(path), opts);
+  if (AI_PATHS.some(p => path.startsWith(p))) noteLimit(r);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
@@ -46,7 +61,7 @@ export function tokenize(text) {
 
 export class RagIndex {
   static async load(url = (API_BASE ? `${API_BASE}/` : import.meta.env.BASE_URL) + "rag/index.json") {
-    const data = await (await fetch(url, { cache: "no-store", headers: authHeaders() })).json();
+    const data = await (await fetch(url, { cache: "no-cache", headers: authHeaders() })).json();   // ETag: unchanged index = 304, no download
     indexVersion = data.version || 0;
     const ix = new RagIndex();
     ix.data = data;
@@ -227,6 +242,7 @@ const STOPPED = "(stopped)";
 const isAbort = (e) => e && (e.name === "AbortError" || e.message === STOPPED);
 
 async function callLlm(system, user, cfg, onDelta) {
+  if (Date.now() < aiBlockedUntil) throw new Error(cooldownMsg());     // don't call while the server asked us to wait
   const ac = new AbortController(); current = ac;
   try { return await callLlmInner(system, user, cfg, onDelta, ac.signal); }
   catch (e) { if (ac.signal.aborted) throw new Error(STOPPED); throw e; }
@@ -239,6 +255,7 @@ async function callLlmInner(system, user, cfg, onDelta, signal) {
     // streamed: the first words reach the lens in ~0.5 s instead of after the whole answer
     r = await fetch(apiUrl("/api/grok/stream"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), signal,
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
+    noteLimit(r);
     if (r.status === 404 || r.status === 405) streamOk = false;               // older server: fall back below
     else {
       if (!r.ok) { j = await r.json().catch(() => ({})); throw new Error(j.error || "HTTP " + r.status); }
@@ -259,8 +276,9 @@ async function callLlmInner(system, user, cfg, onDelta, signal) {
     }
   }
   if (cfg.provider === "grok" || cfg.provider === "groq") {
-    r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), signal,
       body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
+    noteLimit(r);
     j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
     return j.choices[0].message.content;
@@ -283,10 +301,12 @@ export async function generate(question, hits, cfg) {
   try {
     let r, j;
     if (cfg.provider === "grok" || cfg.provider === "groq") {
+      if (Date.now() < aiBlockedUntil) throw new Error(cooldownMsg());
       r = await fetch(apiUrl("/api/grok"), {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }] })
       });
+      noteLimit(r);
       j = await r.json();
       if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
       return j.choices[0].message.content.trim();
@@ -382,7 +402,7 @@ export async function serverSearch(index, query, k = 8, machine = "") {
  *  Fire-and-forget: never throws, never blocks the answer (the PowerShell server simply returns 404). */
 export function logProcOps(event) {
   try {
-    fetch(apiUrl("/api/procops/event"), { method: "POST", headers: { "Content-Type": "application/json" },
+    fetch(apiUrl("/api/procops/event"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(event), keepalive: true }).catch(() => {});
   } catch { /* ignore */ }
 }
@@ -402,7 +422,7 @@ export const VR_VIEW_HINT = "This image is a frame of what the user sees through
   "The red ring marks the centre of their view: describe the object inside or nearest to the red ring, not the ring itself.";
 
 export async function describePhoto(image, hint = "") {
-  const r = await fetch(apiUrl("/api/vision/describe"), { method: "POST", headers: { "Content-Type": "application/json" },
+  const r = await fetch(apiUrl("/api/vision/describe"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ image, hint }), signal: AbortSignal.timeout(60000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(j.error || "HTTP " + r.status);

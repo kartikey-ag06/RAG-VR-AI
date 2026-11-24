@@ -4,7 +4,9 @@ services:
     runtime: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    # --limit-concurrency: beyond 100 open connections uvicorn answers 503 at once instead of slowing everyone down
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --limit-concurrency 100 --timeout-keep-alive 15
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHONPATH
         value: .
@@ -24,3 +26,16 @@ services:
         sync: false
       - key: TURN_SECRET
         sync: false
+      # load protection (backend/limits.py) - tune here without changing code
+      - key: PROXY_HOPS            # 1 = Render's proxy adds the caller's IP last in X-Forwarded-For
+        value: "1"
+      - key: RATE_AI_PER_MIN       # AI calls per minute per user (burst RATE_AI_BURST)
+        value: "20"
+      - key: AI_DAILY_PER_CALLER   # AI calls per day per user / IP
+        value: "400"
+      - key: AI_DAILY_TOTAL        # AI calls per day for the whole server: your cost cap
+        value: "5000"
+      - key: AI_MAX_CONCURRENT     # AI calls running at the same time (others wait up to AI_QUEUE_WAIT s)
+        value: "6"
+      - key: LOG_LEVEL
+        value: INFO

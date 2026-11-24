@@ -33,7 +33,7 @@ DESCRIBE_PROMPT = (
 )
 
 
-def register(app, provider, get_key, list_models, root):
+def register(app, provider, get_key, list_models, root, auth=None):
     cache = {"model": None, "t": 0}
     override = root / "vision_model.txt"
 
@@ -113,6 +113,8 @@ def register(app, provider, get_key, list_models, root):
 
     @app.post("/api/vision/describe")
     def vision_describe(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first: this uses the AI (paste your access token in Settings)"}, 401)
         b = (_body if _body is not None else {})
         bad = check(b.get("image"))
         if bad:
@@ -138,6 +140,8 @@ def register(app, provider, get_key, list_models, root):
 
     @app.post("/api/vision/chat")
     def vision_chat(req: Request, _body=JSONB):
+        if auth and not auth.require_user(req):
+            return JSONResponse({"error": "sign in first: this uses the AI (paste your access token in Settings)"}, 401)
         b = (_body if _body is not None else {})
         bad = check(b.get("image"))
         if bad:
