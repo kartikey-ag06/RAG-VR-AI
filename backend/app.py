@@ -89,12 +89,14 @@ def on_startup():
     threading.Thread(target=load_embeddings, daemon=True).start()
 
 # ---------------------------------------------------------------- document store (uploads) + TF-IDF
-DATA_DIR = ROOT / "backend" / "data"
+# VR_RAG_DATA_DIR moves the whole document store + app data (tests use a temporary folder). Default unchanged.
+DATA_DIR = Path(os.environ["VR_RAG_DATA_DIR"]) if os.environ.get("VR_RAG_DATA_DIR") else ROOT / "backend" / "data"
 
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
+# VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
 from db import DB, LocalKV, database_url
 DBX = None
-if database_url(ROOT):
+if database_url(ROOT) and os.environ.get("VR_RAG_NO_DB") != "1":
     try:
         DBX = DB(database_url(ROOT))
         print("[db] connected: documents, vectors and app data are stored in Postgres (pgvector)", flush=True)

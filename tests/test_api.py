@@ -10,7 +10,9 @@ from app import app, STORE
 
 client = TestClient(app)
 
-def test_api_suite():
+def test_api_suite(monkeypatch):
+    # a fake Groq key: the model list comes from the fake internet in conftest.py, nothing is spent
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
     errors = []
 
     def check(desc, method, url, expected_status=None, **kwargs):
