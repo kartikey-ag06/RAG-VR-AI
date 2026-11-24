@@ -47,67 +47,64 @@ if str(BACKEND_DIR) not in sys.path:
 import numpy as np
 import requests
 import uvicorn
-from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from indexer import Store, tokenize
+from core.kernel import Container, Settings, create_app
 
-ROOT = Path(__file__).resolve().parent.parent
-APP_DIR = ROOT / ("web" if "--app=web" in sys.argv else "glasses_app/dist")
-EMBED_MODEL = os.environ.get("VR_RAG_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+# ---------------------------------------------------------------- settings + app shell (core/kernel)
+SETTINGS = Settings.from_env(Path(__file__).resolve().parent.parent, sys.argv, os.environ)
+ROOT = SETTINGS.root
+APP_DIR = SETTINGS.app_dir
+EMBED_MODEL = SETTINGS.embed_model
+DATA_DIR = SETTINGS.data_dir          # VR_RAG_DATA_DIR moves the document store + app data (tests use a temp folder)
 RRF_K = 60            # standard RRF constant
 W_SEMANTIC = 1.0      # weight of the embedding ranking
 W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "13,00,00,000")
 
-app = FastAPI(title="VR_RAG backend")
 limits.setup_logging()
-
-# Load protection (rate limits, body-size limits, AI budget + concurrency, request ids). Added BEFORE CORS so CORS
-# stays the outermost layer: a 429 / 413 answer still carries CORS headers and the browser can show its message.
-app.add_middleware(LoadGuard)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$|^https://.*\.onrender\.com$",
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Retry-After", "X-Request-ID", "ETag"],
-    max_age=600,
-)
-
-
-@app.get("/healthz")
-def healthz():
-    """Cheap liveness check for Render / uptime monitors: no disk, no database, no AI."""
-    return {"ok": True}
+# Load protection (rate limits, body-size limits, AI budget + concurrency, request ids) sits INSIDE CORS, so a
+# 429 / 413 answer still carries CORS headers and the browser can show its message. /healthz comes from the factory.
+app = create_app(SETTINGS, middleware=[(LoadGuard, {})])
 
 
 @app.on_event("startup")
 def on_startup():
     threading.Thread(target=load_embeddings, daemon=True).start()
 
-# ---------------------------------------------------------------- document store (uploads) + TF-IDF
-# VR_RAG_DATA_DIR moves the whole document store + app data (tests use a temporary folder). Default unchanged.
-DATA_DIR = Path(os.environ["VR_RAG_DATA_DIR"]) if os.environ.get("VR_RAG_DATA_DIR") else ROOT / "backend" / "data"
-
+# ---------------------------------------------------------------- shared services (built once, in this order)
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
 from db import DB, LocalKV, database_url
-DBX = None
-if database_url(ROOT) and os.environ.get("VR_RAG_NO_DB") != "1":
+from auth import Auth
+
+
+def _make_db(c):
+    if not database_url(ROOT) or SETTINGS.no_db:
+        return None
     try:
-        DBX = DB(database_url(ROOT))
+        db = DB(database_url(ROOT))
         print("[db] connected: documents, vectors and app data are stored in Postgres (pgvector)", flush=True)
+        return db
     except Exception as _e:
         print(f"[db] NOT available, using local files only: {_e}", flush=True)
-STORE = Store(DATA_DIR, seed_dir=ROOT / "docs", db=DBX)   # first run imports the 10 original PDFs from docs/
-KV = DBX or LocalKV(DATA_DIR)                             # small records: reminders, pins, sessions...
+        return None
 
-from auth import Auth
-AUTH = Auth(KV)
+
+SERVICES = Container()
+SERVICES.register("db", _make_db)
+SERVICES.register("store", lambda c: Store(SETTINGS.data_dir, seed_dir=SETTINGS.seed_dir, db=c.get("db")))
+SERVICES.register("kv", lambda c: c.get("db") or LocalKV(SETTINGS.data_dir))   # reminders, pins, sessions...
+SERVICES.register("auth", lambda c: Auth(c.get("kv")))
+app.state.services = SERVICES
+
+# old global names kept as aliases, so feature modules and tests keep working unchanged
+DBX = SERVICES.get("db")
+STORE = SERVICES.get("store")        # first run imports the 10 original PDFs from docs/
+KV = SERVICES.get("kv")
+AUTH = SERVICES.get("auth")
 LOW_CONFIDENCE = 0.62     # best semantic match below this = "low confidence" (bge-small cosine similarity)
 
 
