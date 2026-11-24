@@ -1,0 +1,123 @@
+[
+ {
+  "annotations": {
+   "openWorldHint": false,
+   "readOnlyHint": true
+  },
+  "description": "Answer a question from the VR_RAG documents, with citations [n] to document pages. Use style 'spoken' when the answer will be read aloud on glasses.",
+  "inputSchema": {
+   "properties": {
+    "lang": {
+     "description": "Answer language, e.g. Hindi. Default English.",
+     "type": "string"
+    },
+    "machine_id": {
+     "type": "string"
+    },
+    "question": {
+     "type": "string"
+    },
+    "style": {
+     "description": "full (default), glance (3 short points) or spoken (1-2 sentences)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "question"
+   ],
+   "type": "object"
+  },
+  "name": "ask_documents"
+ },
+ {
+  "annotations": {
+   "openWorldHint": false,
+   "readOnlyHint": true
+  },
+  "description": "Full text of one page of a document.",
+  "inputSchema": {
+   "properties": {
+    "doc_uid": {
+     "type": "string"
+    },
+    "page": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "doc_uid",
+    "page"
+   ],
+   "type": "object"
+  },
+  "name": "get_page"
+ },
+ {
+  "annotations": {
+   "openWorldHint": false,
+   "readOnlyHint": true
+  },
+  "description": "Picture of one document page (JPEG, sized for small glasses displays) plus its link.",
+  "inputSchema": {
+   "properties": {
+    "doc_uid": {
+     "type": "string"
+    },
+    "page": {
+     "type": "integer"
+    },
+    "width": {
+     "description": "Image width in pixels (200-1600). Default 600.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "doc_uid",
+    "page"
+   ],
+   "type": "object"
+  },
+  "name": "get_page_image"
+ },
+ {
+  "annotations": {
+   "openWorldHint": false,
+   "readOnlyHint": true
+  },
+  "description": "List the documents in the VR_RAG library (title, pages, machine ids).",
+  "inputSchema": {
+   "properties": {},
+   "type": "object"
+  },
+  "name": "list_documents"
+ },
+ {
+  "annotations": {
+   "openWorldHint": false,
+   "readOnlyHint": true
+  },
+  "description": "Hybrid (keyword + semantic) search in the VR_RAG documents. Returns the best passages with document and page.",
+  "inputSchema": {
+   "properties": {
+    "k": {
+     "default": 6,
+     "description": "How many passages (1-20)",
+     "type": "integer"
+    },
+    "machine_id": {
+     "description": "Only documents tagged with this machine id / QR code",
+     "type": "string"
+    },
+    "query": {
+     "description": "What to look for",
+     "type": "string"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "name": "search_documents"
+ }
+]
