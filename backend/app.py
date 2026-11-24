@@ -614,6 +614,35 @@ def llm_complete(messages, max_tokens=1200, fast=False):
     return r.json()["choices"][0]["message"]["content"] or ""
 
 
+def llm_stream(messages, max_tokens=700):
+    """Server-side streamed chat call (used by /api/v1/ask/stream). Yields text pieces as they arrive."""
+    p = provider()
+    if not p:
+        raise RuntimeError("no API key in grok_api_key.txt")
+    r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages, max_tokens, stream=True), stream=True,
+                  headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
+    if r.status_code != 200:
+        txt = r.text[:300]
+        r.close()
+        raise RuntimeError(f"{p['name']} API: HTTP {r.status_code} - {txt}")
+    r.encoding = "utf-8"
+    try:
+        for line in r.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                piece = (json.loads(data)["choices"][0].get("delta") or {}).get("content") or ""
+            except Exception:
+                continue
+            if piece:
+                yield piece
+    finally:
+        r.close()
+
+
 try:
     import procops
     procops.register(app, STORE, llm_complete, ROOT, AUTH)
@@ -636,7 +665,6 @@ _register("assistant", lambda: assistant.register(app, KV, llm_complete, CALS, A
 CONNECTORS = _register("connectors", lambda: connectors.register(app, KV, AUTH, STORE)) or {"send": None, "get": lambda c: None}
 _register("workflows", lambda: workflows.register(app, KV, llm_complete, run_search, STORE, CONNECTORS, ROOT, AUTH))
 _register("expert", lambda: expert.register(app, ROOT, AUTH))
-_register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH))
 _register("navigation", lambda: navigation.register(app))
 _register("meetings", lambda: meetings.register(app, KV, llm_complete, run_search, AUTH))
 
@@ -673,11 +701,18 @@ def admin_user_delete(uid: str, req: Request):
     return {"deleted": uid}
 
 
+VISION = None
 try:
     import vision
-    vision.register(app, provider, get_key, list_models, ROOT)   # "scan, then ask" (photo questions)
+    VISION = vision.register(app, provider, get_key, list_models, ROOT)   # "scan, then ask" (photo questions)
 except Exception as _e:
     print(f"[vision] disabled: {_e}", flush=True)
+
+
+# ---------------------------------------------------------------- one API for every glasses client ("many doors")
+import api_v1
+CORE = _register("api v1", lambda: api_v1.register(app, STORE, run_search, llm_complete, llm_stream, AUTH, provider, VISION))
+_register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE))
 
 
 @app.post("/api/server/stop")

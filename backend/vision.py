@@ -101,6 +101,16 @@ def register(app, provider, get_key, list_models, root):
             return {"available": False, "reason": str(e)[:200]}
         return {"available": bool(m), "model": m or "", "reason": "" if m else "no vision model on this account"}
 
+    def describe(image, hint=""):
+        """photo -> {object, details, text_seen, keywords, model}. Raises on a bad photo or an API error.
+        Shared by /api/vision/describe and /api/v1/scan (glasses clients)."""
+        bad = check(image)
+        if bad:
+            raise ValueError(bad)
+        hint = str(hint or "")[:300]
+        out, model = call(image, "", (hint + "\n" if hint else "") + DESCRIBE_PROMPT, 300)
+        return _parse_description(out, model)
+
     @app.post("/api/vision/describe")
     def vision_describe(req: Request, _body=JSONB):
         b = (_body if _body is not None else {})
@@ -108,10 +118,11 @@ def register(app, provider, get_key, list_models, root):
         if bad:
             return JSONResponse({"error": bad}, 400)
         try:
-            hint = str(b.get("hint", ""))[:300]
-            out, model = call(b["image"], "", (hint + "\n" if hint else "") + DESCRIBE_PROMPT, 300)
+            return describe(b["image"], b.get("hint", ""))
         except Exception as e:
             return JSONResponse({"error": str(e)}, 502)
+
+    def _parse_description(out, model):
         txt = re.sub(r"^```(?:json)?|```$", "", out.strip(), flags=re.M).strip()
         m = re.search(r"\{.*\}", txt, re.S)
         d = {}
@@ -136,3 +147,6 @@ def register(app, provider, get_key, list_models, root):
         except Exception as e:
             return JSONResponse({"error": str(e)}, 502)
         return {"text": out, "model": model}
+
+    # used by /api/v1 (api_v1.py) so every glasses client shares the same photo pipeline
+    return {"describe": describe, "check": check, "status": vision_status}
