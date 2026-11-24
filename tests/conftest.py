@@ -46,6 +46,10 @@ def _wait_for_index(timeout=300):
     while time.time() - t0 < timeout:
         ready = [e for e in backend.STORE.list() if e["status"] == "ready"]
         busy = any(e["status"] == "processing" for e in backend.STORE.list())
+        failed = [e for e in backend.STORE.list() if e["status"] == "error"]
+        if failed and not busy:            # stop at once instead of waiting the full timeout
+            raise RuntimeError(f"{len(failed)} seed document(s) failed to index, e.g. {failed[0]['name']}: "
+                               f"{failed[0]['error']}  ->  run: python -m pip install -r backend/requirements.txt")
         if (len(backend.STORE.snapshot["index"]["docs"]) >= SEED_DOCS and not busy
                 and backend.STORE.state == "idle" and not backend.STORE.queue and len(ready) >= SEED_DOCS):
             return
