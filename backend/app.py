@@ -20,6 +20,7 @@ Embeddings
 
 Run:  START_VR_RAG.bat   (or: python backend/app.py)
 """
+import envfile  # noqa: F401  - must be first: loads .env before other modules read their settings
 from net import HTTP, JSONB
 import limits
 from limits import LoadGuard

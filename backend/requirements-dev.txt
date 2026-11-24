@@ -1,0 +1,4 @@
+# Tools for developers (not needed to run the server). Installed by SETUP_DEV.bat.
+-r requirements.txt
+pytest>=8.0,<9
+pyflakes>=3.2,<4

@@ -1,5 +1,7 @@
 # VR_RAG - SEBI x Reliance Industries orders on Meta VR Glasses (emulated)
 
+> **Developers:** start with [CONTRIBUTING.md](CONTRIBUTING.md) (one-step setup with `SETUP_DEV.bat`, settings in `.env`, Git workflow).
+
 ## Quick start (no install needed)
 1. Double-click **START_VR_RAG.bat**. It serves `glasses_app/dist` on http://localhost:8765 and opens the browser.
 2. The page loads Meta's **IWER emulator** with the **Meta VR Glasses** device profile already built in. You don't need a Chrome extension.
@@ -17,7 +19,7 @@
 
 ## AI answers: Grok (xAI) or Groq
 1. Create a key at https://console.x.ai (Grok, starts with `xai-`, paid) or https://console.groq.com/keys (Groq, starts with `gsk_`, has a free tier). The server detects which one you have from the prefix.
-2. Open `grok_api_key.txt`, replace the whole line with your key, and save.
+2. Put the key in `.env` after `GROQ_API_KEY=` (copy `.env.example` to `.env` first), or in `grok_api_key.txt` (old way, still works).
 3. Restart `START_VR_RAG.bat`. The server window shows **Grok: ON**, and the app's status shows `LLM: grok`.
 - Optional: put a different model name in `grok_model.txt`. The default is `grok-4.7`. Check https://docs.x.ai for current names.
 - **Security:** the browser never sees the key. The app calls `/api/grok` on the local server, and `server.ps1` adds the key and forwards the request to `https://api.x.ai/v1/chat/completions`.

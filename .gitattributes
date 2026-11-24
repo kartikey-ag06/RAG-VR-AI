@@ -1,0 +1,21 @@
+# Line endings: the repository always stores LF; Git converts on checkout as needed.
+# Why: mixed CRLF/LF caused whole-file diffs and merge conflicts (e.g. .gitignore in PR #2).
+* text=auto
+
+# Windows scripts must keep CRLF or cmd.exe can misread them
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files: never touch
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.glb binary
+*.mp3 binary
+*.wav binary
+*.onnx binary
+*.ico binary
+*.woff binary
+*.woff2 binary
