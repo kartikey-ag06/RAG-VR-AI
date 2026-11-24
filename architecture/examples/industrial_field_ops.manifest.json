@@ -1,0 +1,27 @@
+{
+  "id": "industrial_field_ops",
+  "name": "Industrial Field Ops",
+  "version": "0.1.0",
+  "kind": "pack",
+  "core": ">=1.0,<2.0",
+  "description": "SOP question heatmap and AI-drafted page fixes (ProcOps), machine QR/asset tags, and inspection / incident / work-order reports for field technicians.",
+  "depends_on": ["sessions", "connectors"],
+  "requires_scopes": ["knowledge:read", "knowledge:write", "ai:ask", "events:publish", "connectors:use"],
+  "provides_scopes": ["industrial_field_ops:approve_revision", "industrial_field_ops:view_heatmap"],
+  "subscribes": ["question.asked", "document.deleted"],
+  "publishes": ["industrial_field_ops.revision_approved", "industrial_field_ops.page_flagged"],
+  "config": {
+    "heatmap.low_confidence": {"type": "number", "default": 0.62, "description": "Answers below this confidence flag the page"},
+    "heatmap.min_questions": {"type": "integer", "default": 3, "description": "Questions on a page before it is flagged"},
+    "reports.kinds": {"type": "list", "default": ["inspection", "incident", "workorder"], "description": "Report types offered to technicians"},
+    "machines.tag_min_length": {"type": "integer", "default": 4, "description": "Shortest asset tag matched inside OCR text"}
+  },
+  "mcp_tools": [
+    {
+      "name": "industrial_field_ops_find_machine_docs",
+      "description": "Find the manuals and SOP documents tagged with a machine or asset id (from a QR code, barcode or label).",
+      "input_schema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string", "description": "Text read from the QR code / label"}}},
+      "read_only": true
+    }
+  ]
+}
