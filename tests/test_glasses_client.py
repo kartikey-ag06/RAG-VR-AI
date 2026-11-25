@@ -53,7 +53,7 @@ def test_glasses_client_against_real_backend(tmp_path):
         r = subprocess.run([NODE, str(E2E / "glasses_client_test.mjs")], env=env, capture_output=True, text=True, timeout=120)
         print(r.stdout)
         assert r.returncode == 0, r.stdout + r.stderr
-        assert r.stdout.count("ok  -") == 12
+        assert r.stdout.count("ok  -") == 13
     finally:
         server.terminate()
         try:

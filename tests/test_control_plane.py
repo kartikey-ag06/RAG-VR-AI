@@ -184,10 +184,14 @@ def test_module_gate_per_tenant(protected, acme):
 def test_every_module_prefix_is_a_real_route():
     """A typo in a prefix would make the switch do nothing - every prefix must match at least one route."""
     paths = [getattr(r, "path", "") for r in backend.app.routes]
+    for mid, ctx in backend.LOADER.contexts.items():           # routes of pack routers (mounted at /api/v1/packs/<id>)
+        paths += [f"/api/v1/packs/{mid}{r.path}" for r in ctx.router.routes]
     for m in backend.MODULES.modules.values():
         for p in m.prefixes:
             if p == f"/api/v1/packs/{m.id}":
                 continue                       # reserved for the module's SDK routes; may still be empty
+            if p in backend.ALIASES:
+                p = backend.ALIASES[p][1]       # an old URL of a pack: its target must be a real route
             assert any(x == p or x.startswith(p + "/") for x in paths), f"{m.id}: no route under {p}"
 
 

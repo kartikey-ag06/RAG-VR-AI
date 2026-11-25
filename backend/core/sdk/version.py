@@ -5,7 +5,7 @@ Versions are MAJOR.MINOR.PATCH numbers; missing parts count as 0 ("1.0" == "1.0.
 """
 import re
 
-SDK_VERSION = "1.1.0"   # 1.0: the contract; 1.1 (Phase 5): legacy bridge, MCP tools, published functions, prompts
+SDK_VERSION = "1.2.0"   # 1.1 (Phase 5): legacy bridge, MCP tools, functions, prompts; 1.2 (Phase 6): documents, journal, reports, route aliases
 
 _VERSION = re.compile(r"^\d+(\.\d+){0,2}$")
 _COND = re.compile(r"^(>=|<=|==|!=|>|<)\s*(\d+(?:\.\d+){0,2})$")

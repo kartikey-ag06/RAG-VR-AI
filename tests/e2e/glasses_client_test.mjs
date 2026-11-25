@@ -38,5 +38,13 @@ const p = rag.answerSmart("stop me", local, { provider: "groq" }, () => rag.stop
 const st = await p;
 ok(st.stopped === true, "Stop works while the answer streams");
 
+const realFetch = globalThis.fetch;
+let asks = 0;
+globalThis.fetch = (u, o) => { if (String(u).includes("/api/v1/ask")) asks++; return realFetch(u, o); };
 const none = await rag.answerSmart("x", [], { provider: "none" });
-ok(none.mode === "offline" && !/sebi/i.test(none.text), "no-AI message no longer mentions SEBI");
+ok(asks === 1 && !/sebi/i.test(none.text), "no AI in the app -> still asks the server (ProcOps logs it), no SEBI wording");
+globalThis.fetch = async () => { throw new TypeError("fetch failed"); };     // server unreachable
+const offline = await rag.answerSmart("x", [], { provider: "none" });
+globalThis.fetch = realFetch;
+ok(offline.mode === "offline" && /No matching text/.test(offline.text) && !/sebi/i.test(offline.text),
+   "server unreachable -> local no-AI message, no SEBI wording");

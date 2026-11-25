@@ -71,6 +71,8 @@ const when = (s) => {           // "Today 5:00 PM", "Tomorrow 9:00 AM", "Mon 21 
     : d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }) + ', ' + t;
 };
 let open = null, openMeeting = null, connectors = [];
+let KINDS = '<option value="summary">Session report</option>';   // report kinds: generic + those of switched-on packs
+j('/api/sessions/kinds').then((r) => { KINDS = (r.kinds || []).map((k) => `<option value="${esc(k.kind)}">${esc(k.label)}</option>`).join('') || KINDS; load(); }).catch(() => {});
 const tok = () => { try { return localStorage.getItem('vr-admin-token') || ''; } catch { return ''; } };
 const jp = (u, body, method = 'POST') => j(u, { method, headers: Object.assign({ 'Content-Type': 'application/json' }, tok() ? { 'X-VR-Token': tok() } : {}), body: body ? JSON.stringify(body) : undefined });
 const mins = (s) => s >= 60 ? Math.round(s / 60) + ' min' : Math.round(s) + ' s';
@@ -104,7 +106,7 @@ async function load() {
   $('sessions').innerHTML = s.sessions.length ? `<table><tr><th>Started</th><th>Machine</th><th>Entries</th><th>Report</th></tr>${s.sessions.slice(0, 15).map((x) => `<tr>
       <td><a href="#" data-open="${x.id}" style="color:var(--accent)">${when(x.started)}</a><div class="muted">${esc(x.device || '')}</div></td>
       <td>${x.machine ? `<span class="chip">${esc(x.machine)}</span>` : '-'}</td><td>${x.entries}</td>
-      <td class="row"><select data-kind="${x.id}"><option value="inspection">Inspection report</option><option value="incident">Incident log</option><option value="workorder">Work order</option></select>
+      <td class="row"><select data-kind="${x.id}">${KINDS}</select>
         <a class="btn" data-exp="${x.id}" data-f="pdf" href="#">PDF</a><a class="btn" data-exp="${x.id}" data-f="docx" href="#">DOCX</a><a class="btn" data-exp="${x.id}" data-f="json" href="#">JSON</a>
         ${connectors.length ? `<select data-conn="${x.id}">${connectors.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button data-send="${x.id}">Send</button>` : ''}</td></tr>`).join('')}</table>`
     : '<div class="empty">No sessions yet.</div>';

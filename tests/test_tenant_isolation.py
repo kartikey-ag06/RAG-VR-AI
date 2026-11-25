@@ -159,16 +159,18 @@ def test_kv_scoping_rules(tmp_path):
             pass
 
 
-def test_procops_event_log_is_per_tenant(tmp_path):
-    from procops import EventLog
-    log = EventLog(tmp_path / "procops" / "events.jsonl")
-    log.add({"q": "default question"})
+def test_journal_is_per_tenant(tmp_path):
+    from core.data import LocalJournal
+    log = LocalJournal(tmp_path)
+    log.append("industrial_field_ops.questions", {"q": "default question"})
     with use_tenant("acme"):
-        log.add({"q": "acme question"})
-        assert [e["q"] for e in log.all()] == ["acme question"]
-        log.archive()
-        assert log.all() == []
-    assert [e["q"] for e in log.all()] == ["default question"]                    # acme's archive did not touch it
+        log.append("industrial_field_ops.questions", {"q": "acme question"})
+        assert [e["q"] for e in log.list("industrial_field_ops.questions")] == ["acme question"]
+        log.archive("industrial_field_ops.questions")
+        assert log.list("industrial_field_ops.questions") == []
+    assert [e["q"] for e in log.list("industrial_field_ops.questions")] == ["default question"]   # acme's archive
+    with pytest.raises(ValueError):
+        log.append("../escape", {})
 
 
 def test_middleware_tenant_reaches_worker_threads(acme):

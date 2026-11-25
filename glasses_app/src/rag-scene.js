@@ -8,7 +8,7 @@
 // Glasses input (emulated by IWER): pinch = next page (or next step in a procedure), squeeze = next source.
 // Keys: hold V = talk · X = scan view · N / B = next / previous step · Tab = next source · [ ] = page.
 import { Mesh, PlaneGeometry, MeshBasicMaterial, CanvasTexture, SRGBColorSpace, DoubleSide, Vector3 } from '@iwsdk/core';
-import { RagIndex, pageImageUrl, figureUrl, loadLlmConfig, answerSmart, serverSearch, serverIndexVersion, logProcOps,
+import { RagIndex, pageImageUrl, figureUrl, loadLlmConfig, answerSmart, serverSearch, serverIndexVersion,
   answerVision, describePhoto, visionStatus, VR_VIEW_HINT, setAnswerStyle, api, cleanBody, stopAnswer } from './rag.js';
 import { setupVoice } from './voice.js';
 import { setupCamera } from './camera.js';
@@ -603,8 +603,8 @@ export function setupRag(world) {
     const sources = state.hits.map((h) => `${h.doc.title} - p.${h.chunk.page}`);
     session.log('answer', { text: res.text.slice(0, 1200), mode: res.mode, sources, conf: state.conf });
     if (expert.active) expert.context({ question: q, answer: res.text, sources: sources.join('; '), machine: S.machine });
-    logProcOps(top ? { q: tag + q, uid: top.doc.uid, page: top.chunk.page, mode: res.mode, ms: Math.round(performance.now() - t0), conf: state.conf, hits: found.length, machine: S.machine }
-      : { q: tag + q, mode: res.mode, ms: Math.round(performance.now() - t0), conf: state.conf, hits: found.length, machine: S.machine });
+    // ProcOps: no report from here any more - the server announces every answer ("question.asked") and the
+    // Industrial Field Ops pack logs it (Phase 6).
     $('rag-status').textContent = state.status + ` · ${state.searchMode || ''} · first words ${state.firstWordMs ?? '-'} ms · total ${(state.lastMs / 1000).toFixed(1)} s`;
   }
 

@@ -204,8 +204,12 @@ export function cleanBody(raw) {
 
 export async function answerSmart(question, hits, cfg, onDelta) {
   if (cfg.provider === "none") {
-    if (!hits.length) return { text: "No matching text in your documents, and no AI is connected for general questions.", mode: "offline", cited: [] };
-    return { text: extractive(question, hits), mode: "offline", cited: hits.map((_, i) => i) };
+    // No AI on the server: it still answers (best matching text) and logs the question for ProcOps
+    // ("question.asked"). Only when the server cannot be reached, answer from the local index here.
+    const local = () => (!hits.length
+      ? { text: "No matching text in your documents, and no AI is connected for general questions.", mode: "offline", cited: [] }
+      : { text: extractive(question, hits), mode: "offline", cited: hits.map((_, i) => i) });
+    return askServerSafe(question, hits, null, onDelta, local);
   }
   if (usesServer(cfg)) return askServerSafe(question, hits, null, onDelta,
     (e) => ({ text: `AI error (${cfg.provider}): ${e.message}\n\n` + (hits.length ? extractive(question, hits) : ""), mode: "offline", cited: hits.map((_, i) => i) }));
@@ -377,16 +381,6 @@ export async function serverSearch(index, query, k = 8, machine = "") {
     return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits,
       conf: j.conf, lowConfidence: !!j.lowConfidence, machine: j.machine, machineMatched: j.machineMatched, engine: j.engine };
   } catch { return null; }
-}
-
-// ---------------- ProcOps: every question is a bug report for the page ----------------
-/** Logs a question + the page it was answered from to the ProcOps dashboard (/procops).
- *  Fire-and-forget: never throws, never blocks the answer (the PowerShell server simply returns 404). */
-export function logProcOps(event) {
-  try {
-    fetch(apiUrl("/api/procops/event"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(event), keepalive: true }).catch(() => {});
-  } catch { /* ignore */ }
 }
 
 // ---------------- Scan, then ask: photo + question ----------------

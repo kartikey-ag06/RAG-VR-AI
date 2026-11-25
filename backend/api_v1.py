@@ -219,14 +219,14 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         return {"answer": extractive(hits), "mode": "offline", "citations": [citation(h, i + 1) for i, h in enumerate(hits[:3])],
                 "confidence": res.get("conf"), "search_mode": res.get("mode"), "note": note}
 
-    def asked(question, out, hits, door):
+    def asked(question, out, hits, door, tag=""):
         """Tell the Core event bus an answer was produced ("question.asked", Phase 5) - modules such as the
         Industrial pack listen instead of the client reporting it. Never breaks or slows the answer."""
         if events is None:
             return
         try:
             events("question.asked", {
-                "question": question[:300], "door": door, "mode": out.get("mode"),
+                "question": question[:300], "door": door, "mode": out.get("mode"), "tag": str(tag or "")[:80],
                 "confidence": out.get("confidence"), "search_mode": out.get("search_mode"),
                 "cited": [{"doc_uid": c["doc_uid"], "page": c["page"]} for c in out.get("citations", [])],
                 "candidates": [{"doc_uid": h["uid"], "page": h["page"]} for h in hits[:6]]})
@@ -235,7 +235,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
 
     def answer(question, machine, style, lang, user, photo=None, k=6, given=None, door="v1"):
         out, hits = _answer(question, machine, style, lang, user, photo, k, given)
-        asked(question, out, hits, door)
+        asked(question, out, hits, door, machine)
         return out
 
     def _answer(question, machine, style, lang, user, photo=None, k=6, given=None):
@@ -388,7 +388,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             yield sse("meta", {"search_mode": res.get("mode"), "confidence": res.get("conf"),
                                "candidates": [citation(h, n + 1) for n, h in enumerate(hits)]})
             def done(out):
-                asked(q, out, hits, "v1")
+                asked(q, out, hits, "v1", b.get("machine_id"))
                 return sse("done", out)
 
             if not provider():

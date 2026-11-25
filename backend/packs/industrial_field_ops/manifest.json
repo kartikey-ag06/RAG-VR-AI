@@ -1,0 +1,26 @@
+{
+  "id": "industrial_field_ops",
+  "name": "Industrial Field Ops",
+  "version": "1.0.0",
+  "kind": "pack",
+  "core": ">=1.2,<2.0",
+  "description": "SOP question heatmap + AI redline (ProcOps), machine tags, inspection / incident / work-order reports",
+  "requires_scopes": ["knowledge:read", "knowledge:write", "ai:ask"],
+  "provides_scopes": ["industrial_field_ops:approve"],
+  "subscribes": ["question.asked"],
+  "config": {
+    "low_confidence": {"type": "number", "default": 0.62,
+                       "description": "Answers below this search confidence are listed as knowledge gaps"},
+    "dedupe_seconds": {"type": "integer", "default": 120,
+                       "description": "Same question from the server and an older glasses build within this time = one entry"}
+  },
+  "mcp_tools": [
+    {"name": "industrial_field_ops_friction",
+     "description": "Which document pages workers ask most questions about (open questions per page): where procedures are unclear.",
+     "input_schema": {"type": "object", "properties": {"limit": {"type": "integer", "description": "How many pages (1-20)", "default": 10}}}},
+    {"name": "industrial_field_ops_resolve_machine",
+     "description": "Find the machine id in text read from a QR code, barcode or label, and the documents for that machine.",
+     "input_schema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}}
+  ],
+  "route_aliases": {"/api/procops": "", "/procops": "/dashboard", "/api/machines": "/machines"}
+}
