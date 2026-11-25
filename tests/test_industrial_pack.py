@@ -179,11 +179,12 @@ def test_machine_routes_old_and_new(protected):
 
 
 def test_report_kinds_come_from_the_pack(protected, acme):
-    kinds = [k["kind"] for k in client.get("/api/sessions/kinds", headers=ADMIN).json()["kinds"]]
-    assert kinds[:3] == ["inspection", "incident", "workorder"] and "summary" in kinds
+    kinds = {k["kind"] for k in client.get("/api/sessions/kinds", headers=ADMIN).json()["kinds"]}
+    assert {"inspection", "incident", "workorder", "summary"} <= kinds
     client.put(f"/api/core/tenants/{acme}/packs/industrial_field_ops", json={"enabled": False}, headers=ADMIN)
     acme_admin = key_for(acme, ["admin"])
-    assert [k["kind"] for k in client.get("/api/sessions/kinds", headers=acme_admin).json()["kinds"]] == ["summary"]
+    off_kinds = {k["kind"] for k in client.get("/api/sessions/kinds", headers=acme_admin).json()["kinds"]}
+    assert "summary" in off_kinds and not ({"inspection", "incident", "workorder"} & off_kinds)
 
 
 def test_mcp_tools(protected, clean_log):
@@ -278,6 +279,6 @@ print("RESULT" + __import__("json").dumps(out))
     assert {"assistant", "calendar_sync", "connectors", "sessions", "expert", "navigation", "meetings", "vision"} <= set(out["others"])
     assert out["health"] == 200 and out["search"] == 200 and out["ask_mode"] == "offline" and out["notes"] == 200
     assert out["procops"] == 404 and out["machines"] == 404
-    assert out["kinds"] == ["summary"]                                        # generic report still works
+    assert "summary" in out["kinds"] and not ({"inspection", "incident", "workorder"} & set(out["kinds"]))
     assert "ask_documents" in out["mcp_tools"] and not any(t.startswith("industrial") for t in out["mcp_tools"])
     assert out["listener_errors"] == 0

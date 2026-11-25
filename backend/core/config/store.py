@@ -128,12 +128,42 @@ class ConfigStore:
             self._cache = (0.0, {})
         return True
 
+    def rollback(self, key: str, version: int, tenant_id: Optional[str] = None, module: Optional[str] = None,
+                 actor: str = "") -> dict:
+        """Restore an earlier value from config_history as a new version (append-only history)."""
+        if key not in self.schema:
+            raise ConfigError(f"unknown config key {key!r}")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ConfigError("version must be a positive integer")
+        s = scope_id(tenant_id, module)
+        rid = f"{s}|{key}"
+        with self._lock:
+            rows = sorted((r for r in self.kv.kv_list("config_history") if r.get("config_id") == rid),
+                          key=lambda r: r["id"], reverse=True)
+            target = next((r for r in rows if r.get("version") == version and not r.get("removed")), None)
+            if target is None:
+                raise LookupError(f"version {version} not found for {key!r}")
+            value = target["new"]
+            check_value(self.schema[key], value)
+            old = self.kv.kv_get("config", rid)
+            rec = {"id": rid, "scope": s, "key": key, "value": value, "version": (old or {}).get("version", 0) + 1,
+                   "updated": time.time(), "by": actor}
+            self.kv.kv_put("config", rid, rec)
+            self._history(rid, old, rec, actor, rollback_to=version)
+            self._cache = (0.0, {})
+        return rec
+
     def history(self, key: Optional[str] = None, limit: int = 100) -> list:
         rows = sorted(self.kv.kv_list("config_history"), key=lambda r: r["id"], reverse=True)   # newest first
         return [r for r in rows if key in (None, r["key"])][:limit]
 
-    def _history(self, rid, old, new, actor):
+    def _history(self, rid, old, new, actor, rollback_to: Optional[int] = None):
         hid = f"{time.time_ns():020d}"
-        self.kv.kv_put("config_history", hid, {
+        entry = {
             "id": hid, "config_id": rid, "key": rid.split("|", 1)[1], "ts": time.time(), "by": actor,
-            "old": (old or {}).get("value"), "new": (new or {}).get("value"), "removed": new is None})
+            "old": (old or {}).get("value"), "new": (new or {}).get("value"),
+            "version": (new or {}).get("version"), "removed": new is None,
+        }
+        if rollback_to is not None:
+            entry["rollback_to"] = rollback_to
+        self.kv.kv_put("config_history", hid, entry)

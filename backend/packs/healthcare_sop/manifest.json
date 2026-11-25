@@ -1,0 +1,30 @@
+{
+  "id": "healthcare_sop",
+  "name": "Healthcare Clinical SOP",
+  "version": "1.0.0",
+  "kind": "pack",
+  "core": ">=1.2,<2.0",
+  "description": "Clinical SOP checklists, most-asked SOP topic tracking, and clinical audit reports",
+  "requires_scopes": ["knowledge:read", "ai:ask"],
+  "provides_scopes": ["healthcare_sop:signoff"],
+  "subscribes": ["question.asked"],
+  "config": {
+    "max_steps": {
+      "type": "integer",
+      "default": 6,
+      "description": "Maximum numbered steps in a generated clinical SOP checklist"
+    }
+  },
+  "mcp_tools": [
+    {
+      "name": "healthcare_sop_topics",
+      "description": "Return the most asked clinical SOP topics for the caller's organisation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": {"type": "integer", "default": 5}
+        }
+      }
+    }
+  ]
+}
