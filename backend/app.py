@@ -72,6 +72,7 @@ def on_startup():
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
 from core.data import DB, LocalKV, database_url
 from auth import Auth
+from core.identity import ApiKeys, Identity, Tenants
 
 
 def _make_db(c):
@@ -91,6 +92,9 @@ SERVICES.register("db", _make_db)
 SERVICES.register("store", lambda c: Store(SETTINGS.data_dir, seed_dir=SETTINGS.seed_dir, db=c.get("db")))
 SERVICES.register("kv", lambda c: c.get("db") or LocalKV(SETTINGS.data_dir))   # reminders, pins, sessions...
 SERVICES.register("auth", lambda c: Auth(c.get("kv")))
+SERVICES.register("tenants", lambda c: Tenants(c.get("kv")))
+SERVICES.register("keys", lambda c: ApiKeys(c.get("kv"), c.get("tenants")))
+SERVICES.register("identity", lambda c: Identity(c.get("keys"), c.get("auth")))
 app.state.services = SERVICES
 
 # old global names kept as aliases, so feature modules and tests keep working unchanged
@@ -98,6 +102,8 @@ DBX = SERVICES.get("db")
 STORE = SERVICES.get("store")        # first run imports the 10 original PDFs from docs/
 KV = SERVICES.get("kv")
 AUTH = SERVICES.get("auth")
+IDENTITY = SERVICES.get("identity")       # who is calling: tenant + scopes (core/identity, Phase 4)
+SERVICES.get("tenants").ensure_default()
 # ---------------------------------------------------------------- search -> core/knowledge
 from core.knowledge import LOW_CONFIDENCE, SearchEngine, norm_code
 from core.knowledge.search import RRF_K, W_KEYWORD, W_SEMANTIC  # noqa: F401  (old names, still importable)
@@ -522,8 +528,11 @@ except Exception as _e:
 
 # ---------------------------------------------------------------- one API for every glasses client ("many doors")
 import api_v1
-CORE = _register("api v1", lambda: api_v1.register(app, STORE, run_search, llm_complete, llm_stream, AUTH, provider, VISION))
-_register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE))
+CORE = _register("api v1", lambda: api_v1.register(app, STORE, run_search, llm_complete, llm_stream, AUTH, provider, VISION,
+                                                   identity=IDENTITY))
+_register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE, identity=IDENTITY))
+from core.admin import register_admin
+_register("control plane", lambda: register_admin(app, IDENTITY, SERVICES.get("tenants"), SERVICES.get("keys")))
 
 
 @app.post("/api/server/stop")

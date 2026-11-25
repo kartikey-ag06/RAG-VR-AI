@@ -16,6 +16,7 @@ import os
 import secrets
 
 from fastapi import Request
+from core.sdk.context import PolicyDenied
 from fastapi.responses import JSONResponse, Response
 
 VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
@@ -49,7 +50,15 @@ for _t in TOOLS:                                     # every tool only reads: le
     _t["annotations"] = {"readOnlyHint": True, "openWorldHint": False}
 
 
-def register(app, store, search, llm, auth, core=None):
+def register(app, store, search, llm, auth, core=None, identity=None):
+    def key_principal(req):
+        """An API key (Bearer vrk_...) -> its principal; None when the caller does not send one.
+        A wrong or revoked key raises PolicyDenied (401)."""
+        h = req.headers.get("authorization", "")
+        if identity is None or not identity.keys.looks_like_key(h[7:].strip() if h.startswith("Bearer ") else ""):
+            return None
+        return identity.resolve(req)[0]
+
     def allowed(req):
         tok = os.environ.get("MCP_TOKEN", "")
         if tok:
@@ -126,7 +135,7 @@ def register(app, store, search, llm, auth, core=None):
             return f"{ans.strip()}\n\nSources:\n{refs}"
         raise ValueError(f"unknown tool {name}")
 
-    def handle(msg, base=""):
+    def handle(msg, base="", can_ask=True):
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
             return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
         mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
@@ -146,6 +155,8 @@ def register(app, store, search, llm, auth, core=None):
             return ok({"tools": TOOLS})
         if method == "tools/call":
             try:
+                if params.get("name") == "ask_documents" and not can_ask:
+                    raise ValueError("this API key lacks the scope 'ai:ask'")
                 out = call_tool(params.get("name"), params.get("arguments") or {}, base)
                 content = out if isinstance(out, list) else [{"type": "text", "text": out}]
                 return ok({"content": content, "isError": False})
@@ -155,16 +166,23 @@ def register(app, store, search, llm, auth, core=None):
 
     @app.post("/mcp")
     def mcp(req: Request, _body=JSONB):
-        if not allowed(req):
+        try:
+            key = key_principal(req)
+        except PolicyDenied:
             return JSONResponse({"error": "unauthorized"}, 401)
+        if key is not None and not key.has("knowledge:read"):
+            return JSONResponse({"error": "this API key lacks the scope 'knowledge:read'"}, 403)
+        if key is None and not allowed(req):
+            return JSONResponse({"error": "unauthorized"}, 401)
+        can_ask = key is None or key.has("ai:ask")
         body = _body
         if body is None:
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
         base = (os.environ.get("PUBLIC_URL") or str(req.base_url)).rstrip("/")
         if isinstance(body, list):
-            out = [r for r in (handle(m, base) for m in body) if r is not None]
+            out = [r for r in (handle(m, base, can_ask) for m in body) if r is not None]
             return JSONResponse(out) if out else Response(status_code=202)
-        r = handle(body, base)
+        r = handle(body, base, can_ask)
         if r is None:
             return Response(status_code=202)
         headers = {}

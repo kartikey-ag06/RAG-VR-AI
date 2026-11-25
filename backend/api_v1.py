@@ -26,6 +26,7 @@ Auth (same rules as the rest of the app)
   - ask / ask/stream / scan: on a protected server (Render, users, ADMIN_TOKEN) a token is needed (same as /api/grok)
   - X-VR-Token header or ?token=  -> that user (document groups are respected)
   - Authorization: Bearer <MCP_TOKEN>  -> service access (cloud assistants), public documents only
+  - Authorization: Bearer vrk_...      -> an API key: its tenant and scopes (core/identity), public documents only
 """
 import json
 import os
@@ -39,6 +40,8 @@ from fastapi import Request
 from pathlib import Path
 
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+
+from core.sdk.context import PolicyDenied
 
 from net import JSONB
 
@@ -118,7 +121,7 @@ def extractive(hits, n=3):
     return "\n".join(out)
 
 
-def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None):
+def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None):
     lock = threading.Lock()
     thumbs = OrderedDict()                       # resized page images, LRU (small displays ask for the same pages)
 
@@ -128,17 +131,27 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         h = req.headers.get("authorization", "")
         return bool(tok) and h.startswith("Bearer ") and secrets.compare_digest(h[7:].strip(), tok)
 
-    def caller(req, ai=False):
-        """-> (allowed, user). Same rules as the older endpoints:
-        reading (documents, search, pages) is open, and anonymous callers only see public documents (like /api/search);
-        AI calls (ask, stream, scan) cost API credits, so a protected server needs a token (like /api/grok).
-        Service callers (Bearer MCP_TOKEN) get user=None: public documents only."""
-        if service_token(req):
-            return True, None
-        return (auth.require_user(req) if ai else True), auth.user_of(req)
+    def caller(req, ai=False, scope=None):
+        """-> (allowed, user or error). One rule for every endpoint (core/identity, Phase 4):
+        reading (documents, search, pages) needs scope knowledge:read - anonymous callers have it and see only public
+        documents; AI calls need ai:ask (scan: ai:vision), which costs API credits, so a protected server needs a
+        token or an API key. API keys (Bearer vrk_...) and MCP_TOKEN get user=None: public documents only."""
+        scope = scope or ("ai:ask" if ai else "knowledge:read")
+        if identity is None:                                   # older wiring (no identity): previous rules
+            if service_token(req):
+                return True, None
+            return (auth.require_user(req) if ai else True), auth.user_of(req)
+        try:
+            _, user = identity.require(req, scope)
+            return True, user
+        except PolicyDenied as e:
+            return False, e
 
-    def denied():
-        return JSONResponse({"error": "unauthorized", "hint": "send X-VR-Token or Authorization: Bearer <MCP_TOKEN>"}, 401)
+    def denied(err=None):
+        status = err.status if isinstance(err, PolicyDenied) else 401
+        msg = err.reason if isinstance(err, PolicyDenied) and status == 403 else "unauthorized"
+        return JSONResponse({"error": msg, "hint": "send X-VR-Token, or Authorization: Bearer <API key or MCP_TOKEN>"},
+                            status)
 
     def visible(entry, user):
         return bool(entry) and auth.can_see(entry.get("groups", []), user)
@@ -280,7 +293,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def v1_documents(req: Request):
         ok, user = caller(req)
         if not ok:
-            return denied()
+            return denied(user)
         docs = [{"doc_uid": d["uid"], "title": d["title"], "pages": d["pages"], "type": d.get("type", ""),
                  "machine_ids": d.get("tags", [])}
                 for d in store.snapshot["index"]["docs"] if d.get("uid") and auth.can_see(d.get("groups", []), user)]
@@ -290,7 +303,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def v1_search(req: Request, _body=JSONB):
         ok, user = caller(req)
         if not ok:
-            return denied()
+            return denied(user)
         b = _body or {}
         q = question_of(b, "query")
         if not q:
@@ -307,7 +320,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def v1_ask(req: Request, _body=JSONB):
         ok, user = caller(req, ai=True)
         if not ok:
-            return denied()
+            return denied(user)
         b = _body or {}
         q = question_of(b)
         if not q:
@@ -319,7 +332,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def v1_ask_stream(req: Request, _body=JSONB):
         ok, user = caller(req, ai=True)
         if not ok:
-            return denied()
+            return denied(user)
         b = _body or {}
         q = question_of(b)
         if not q:
@@ -358,9 +371,9 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
 
     @app.post(f"{API}/scan")
     def v1_scan(req: Request, _body=JSONB):
-        ok, user = caller(req, ai=True)
+        ok, user = caller(req, scope="ai:vision")
         if not ok:
-            return denied()
+            return denied(user)
         if not vision:
             return JSONResponse({"error": "photo questions are not available on this server"}, 501)
         b = _body or {}
@@ -382,7 +395,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def v1_page(uid: str, page: str, req: Request):
         ok, user = caller(req)
         if not ok:
-            return denied()
+            return denied(user)
         m = re.fullmatch(r"(\d+)(\.jpg)?", page)
         if not re.fullmatch(r"[0-9a-f]{12}", uid) or not m:
             return JSONResponse({"error": "not found"}, 404)
