@@ -30,11 +30,9 @@ CHUNK_WORDS = 120
 OVERLAP = 30
 IMG_WIDTH = 1000
 
-STOP = set("""a an the and or of to in on for by with at from as is are was were be been being this that these those it its
-which who whom whose what when where why how not no nor but if then than so such into upon under over above below
-shall will would should may might can could must do does did done have has had having he she they them his her their
-i we you me us our your said also any all each other same per vide hereinafter thereof therein herein whereas
-page sebi noticee noticees order""".split())
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend"))
+from core.knowledge.stopwords import load_stopwords  # noqa: E402  same stop-words as the server index
+STOP = load_stopwords(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 

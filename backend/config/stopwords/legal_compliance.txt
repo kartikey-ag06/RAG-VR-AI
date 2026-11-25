@@ -1,0 +1,4 @@
+# Extra stop-words for the Legal & Compliance demo corpus (SEBI enforcement orders).
+# These words appear in almost every passage of that corpus, so they carry no search value there.
+# One or more words per line; lines starting with # are comments. Loaded by default (see VR_RAG_STOPWORDS_FILES).
+sebi noticee noticees order
