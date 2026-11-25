@@ -27,15 +27,12 @@ from limits import LoadGuard
 log = limits.log
 from starlette.concurrency import run_in_threadpool
 import json
-import math
 import os
 import re
 import socket
 import sys
 import threading
-import time
 import webbrowser
-from collections import Counter
 import gzip
 import hashlib
 from pathlib import Path
@@ -44,7 +41,6 @@ BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-import numpy as np
 import requests
 import uvicorn
 from fastapi import File, Request, UploadFile
@@ -60,9 +56,6 @@ ROOT = SETTINGS.root
 APP_DIR = SETTINGS.app_dir
 EMBED_MODEL = SETTINGS.embed_model
 DATA_DIR = SETTINGS.data_dir          # VR_RAG_DATA_DIR moves the document store + app data (tests use a temp folder)
-RRF_K = 60            # standard RRF constant
-W_SEMANTIC = 1.0      # weight of the embedding ranking
-W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "13,00,00,000")
 
 limits.setup_logging()
 # Load protection (rate limits, body-size limits, AI budget + concurrency, request ids) sits INSIDE CORS, so a
@@ -105,127 +98,24 @@ DBX = SERVICES.get("db")
 STORE = SERVICES.get("store")        # first run imports the 10 original PDFs from docs/
 KV = SERVICES.get("kv")
 AUTH = SERVICES.get("auth")
-LOW_CONFIDENCE = 0.62     # best semantic match below this = "low confidence" (bge-small cosine similarity)
+# ---------------------------------------------------------------- search -> core/knowledge
+from core.knowledge import LOW_CONFIDENCE, SearchEngine, norm_code
+from core.knowledge.search import RRF_K, W_KEYWORD, W_SEMANTIC  # noqa: F401  (old names, still importable)
 
-
-def tfidf_scores(snap, query):
-    vocab, idf, chunks = snap["vocab"], snap["index"]["idf"], snap["index"]["chunks"]
-    counts = Counter(t for t in tokenize(query) if t in vocab)
-    out = np.zeros(len(chunks), dtype=np.float32)
-    if not counts:
-        return out
-    q = {vocab[t]: (1 + math.log(c)) * idf[vocab[t]] for t, c in counts.items()}
-    norm = math.sqrt(sum(v * v for v in q.values()))
-    for i, ch in enumerate(chunks):
-        s = 0.0
-        for t, w in zip(ch["terms"], ch["weights"]):
-            qw = q.get(t)
-            if qw:
-                s += qw * w
-        out[i] = s / norm
-    return out
-
-
-# ---------------------------------------------------------------- embeddings (model loaded in background)
-EMB = {"state": "warming", "model": None, "error": None}
-
-
-def load_embeddings():
-    if EMB.get("state") == "ready":
-        return
-    t0 = time.time()
-    try:
-        from fastembed import TextEmbedding
-        model = TextEmbedding(EMBED_MODEL)
-        EMB.update(state="ready", model=model)
-        STORE.model_name, STORE.embedder = EMBED_MODEL, model
-        STORE.request_rebuild()                      # embeds any document not cached yet
-        print(f"[embeddings] model ready in {time.time() - t0:.1f}s", flush=True)
-    except Exception as e:  # keep serving with TF-IDF only
-        EMB.update(state="failed", error=str(e))
-        print(f"[embeddings] FAILED, using keyword search only: {e}", flush=True)
-
-
-def ranks(scores):
-    order = np.argsort(-scores)
-    r = np.empty(len(scores), dtype=np.int32)
-    r[order] = np.arange(1, len(scores) + 1)
-    return r
-
-
-def norm_code(x):
-    return re.sub(r"[^a-z0-9]", "", str(x).lower())
+SEARCH = SearchEngine(STORE, tokenize=tokenize, can_see=AUTH.can_see, embed_model=EMBED_MODEL, db=DBX)
+EMB = SEARCH.emb                       # same dict: status pages read EMB["state"]
+load_embeddings = SEARCH.load_embeddings
 
 
 def visible_positions(snap, user):
-    return [d["id"] for d in snap["index"]["docs"] if AUTH.can_see(d.get("groups", []), user)]
-
-
-def machine_positions(snap, machine):
-    m = norm_code(machine)
-    if not m:
-        return []
-    return [d["id"] for d in snap["index"]["docs"]
-            if any(norm_code(t) and (norm_code(t) == m or (len(m) >= 4 and (m in norm_code(t) or norm_code(t) in m)))
-                   for t in d.get("tags", []))]
-
-
-def _hit(snap, i, score, kwv, semv):
-    c = snap["index"]["chunks"][i]
-    d = snap["index"]["docs"][c["doc"]]
-    return {"i": i, "score": score, "kw": kwv, "sem": semv,          # the passage itself, from the SAME snapshot
-            "doc": c["doc"], "page": c["page"], "uid": d["uid"], "title": d["title"], "text": c["text"]}
+    return SEARCH.visible_positions(snap, user)
 
 
 def run_search(query, k=8, machine="", user=None):
-    """Hybrid search used by the glasses, MCP, workflows. Respects permissions and the machine filter."""
-    snap = STORE.snapshot                                  # one consistent version of the index
-    chunks = snap["index"]["chunks"]
-    n = len(chunks)
-    out = {"version": snap["version"], "hits": [], "machine": machine or "", "machineMatched": None, "conf": None}
-    if not query or not n:
-        return dict(out, mode="none")
-    allowed = set(visible_positions(snap, user))
-    if machine:
-        mp = set(machine_positions(snap, machine)) & allowed
-        out["machineMatched"] = bool(mp)
-        if mp:
-            allowed = mp
-    doc_of = np.fromiter((c["doc"] for c in chunks), dtype=np.int32, count=n)
-    mask = np.isin(doc_of, np.fromiter(allowed, dtype=np.int32)) if allowed else np.zeros(n, bool)
-    kw = tfidf_scores(snap, query)
-    kw[~mask] = 0
-    matrix = snap["matrix"]
-    if EMB["state"] != "ready" or matrix is None or matrix.shape[0] != n:
-        order = [int(i) for i in np.argsort(-kw)[:k] if kw[i] > 0]
-        return dict(out, mode="keyword", embeddings=EMB["state"],
-                    hits=[_hit(snap, i, float(kw[i]), float(kw[i]), None) for i in order])
-    q = np.array(list(EMB["model"].query_embed([query]))[0], dtype=np.float32)
-    q /= np.linalg.norm(q)
-    engine = "memory"
-    sem = None
-    if DBX is not None:                                    # semantic search inside Postgres (pgvector)
-        try:
-            uids = [snap["uids"][p] for p in allowed]
-            sem = np.full(n, -1.0, dtype=np.float32)
-            for uid, ordn, sc in DBX.semantic(q, EMBED_MODEL, max(60, k * 6), uids):
-                i = snap["keyidx"].get((uid, ordn))
-                if i is not None:
-                    sem[i] = sc
-            engine = "pgvector"
-        except Exception as e:
-            print(f"[db] pgvector search failed, using memory: {e}", flush=True)
-            sem = None
-    if sem is None:
-        sem = matrix @ q
-    sem[~mask] = -1.0
-    rrf = W_SEMANTIC / (RRF_K + ranks(sem)) + W_KEYWORD * (kw > 0) / (RRF_K + ranks(kw))
-    rrf[~mask] = -1.0
-    order = [int(i) for i in np.argsort(-rrf)[:k] if rrf[i] > 0]
-    conf = float(max((sem[i] for i in order), default=0.0))
-    return dict(out, mode="hybrid", engine=engine, model=EMBED_MODEL, conf=round(conf, 3),
-                lowConfidence=conf < LOW_CONFIDENCE,
-                hits=[_hit(snap, i, float(rrf[i]), float(kw[i]), float(sem[i])) for i in order])
+    """Hybrid search used by the glasses, MCP, workflows. Respects permissions and the machine filter.
+    The Core searches by generic TAG; the old API calls it "machine", so the field names are mapped back here."""
+    res = SEARCH.search(query, k, tag=machine, user=user)
+    return {("machine" if key == "tag" else "machineMatched" if key == "tagMatched" else key): v for key, v in res.items()}
 
 
 @app.post("/api/search")
