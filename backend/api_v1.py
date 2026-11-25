@@ -37,12 +37,14 @@ from collections import OrderedDict
 from io import BytesIO
 
 from fastapi import Request
+
+from core.ai.prompts import PromptRegistry
 from pathlib import Path
 
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from core.data.tenancy import current_tenant, doc_tenant
-from core.sdk.context import PolicyDenied
+from core.sdk.context import BudgetExceeded, PolicyDenied
 
 from net import JSONB
 
@@ -66,6 +68,7 @@ VISION_RULE = (
     "(you do not see the photo yourself). Start with what the object is, then the key facts about it. "
     "Only use SOURCE: PDF when an excerpt really is about this object or question."
 )
+
 LENGTH = {
     "full": "max 120 words",
     "glance": "at most 3 short numbered points, each under 12 words (small lens display)",
@@ -122,7 +125,7 @@ def extractive(hits, n=3):
     return "\n".join(out)
 
 
-def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None):
+def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None, config=None):
     lock = threading.Lock()
     thumbs = OrderedDict()                       # resized page images, LRU (small displays ask for the same pages)
 
@@ -180,8 +183,16 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def find(query, k, machine, user):
         return run_search(query, max(1, min(20, int(k or 6))), str(machine or "")[:80], user)
 
+    prompts = PromptRegistry(config)                       # tenant can override these texts via config (Phase 4)
+    prompts.register("answer.system", SMART_SYSTEM, "System prompt for document answers")
+    prompts.register("answer.vision_rule", VISION_RULE, "Extra rule added when a photo is attached")
+
+    def prompt(pid, _default):
+        return prompts.get(pid)
+
     def messages(question, hits, style, lang, photo=None):
-        system = SMART_SYSTEM + (VISION_RULE if photo else "") + style_rules(style, lang)
+        system = (prompt("answer.system", SMART_SYSTEM) + (prompt("answer.vision_rule", VISION_RULE) if photo else "")
+                  + style_rules(style, lang))
         seen = ""
         if photo:
             seen = ("PHOTO DESCRIPTION (from the vision model): " + (photo.get("object") or "unknown object") + ". "
@@ -224,6 +235,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             return offline(hits, res, "no AI key on the server")
         try:
             raw = llm_complete(messages(question, hits, style, lang, photo), 900)
+        except BudgetExceeded as e:
+            return offline(hits, res, e.reason)
         except Exception as e:
             return offline(hits, res, f"AI error: {e}")
         return result(raw, hits, res, positions=positions)
@@ -363,6 +376,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                 for piece in llm_stream(messages(q, hits, style, lang, photo), 900):
                     raw.append(piece)
                     yield sse("delta", {"text": piece, "answer_so_far": clean_body("".join(raw))})
+            except BudgetExceeded as e:
+                yield sse("done", offline(hits, res, e.reason))
             except Exception as e:
                 yield sse("done", offline(hits, res, f"AI error: {e}"))
                 return
@@ -387,6 +402,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         style, lang = opts(b)
         try:
             photo = vision["describe"](image, b.get("hint", ""))
+        except BudgetExceeded as e:
+            return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 502)
         out = answer(q, b.get("machine_id"), style, lang, user, photo=photo)

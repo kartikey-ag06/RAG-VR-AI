@@ -13,7 +13,8 @@ from contextvars import ContextVar
 
 DEFAULT_TENANT = "default"
 # login / system records: needed BEFORE the tenant is known, or keyed by a globally unique id
-GLOBAL_KINDS = frozenset({"user", "apikey", "tenant", "embsig"})
+GLOBAL_KINDS = frozenset({"user", "apikey", "tenant", "embsig",                 # logins, embedding cache
+                          "config", "config_history", "module_state", "audit"})       # control plane (Phase 4)
 KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 TENANT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
 
