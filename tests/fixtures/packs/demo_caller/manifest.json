@@ -1,0 +1,14 @@
+{
+  "id": "demo_caller",
+  "name": "Demo Caller",
+  "version": "0.1.0",
+  "kind": "pack",
+  "core": ">=1.1,<2.0",
+  "description": "Calls a function of demo_pack",
+  "depends_on": [
+    "demo_pack"
+  ],
+  "requires_scopes": [
+    "knowledge:read"
+  ]
+}

@@ -35,6 +35,7 @@ class ModuleRegistry:
     modules: Dict[str, Module] = field(default_factory=dict)
     _cache: tuple = (0.0, {})
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    broken: set = field(default_factory=set)            # modules whose code failed to load: always OFF
 
     def add(self, m: Module) -> None:
         if not MODULE_ID.match(m.id):
@@ -65,9 +66,12 @@ class ModuleRegistry:
             self._cache = (time.time(), states)
         return states
 
+    def mark_broken(self, module_id: str) -> None:
+        self.broken.add(module_id)
+
     def enabled(self, module_id: str, tenant_id: Optional[str] = None) -> bool:
         m = self.modules.get(module_id)
-        if not m:
+        if not m or module_id in self.broken:
             return False
         rec = self._states().get(f"{tenant_id or current_tenant()}|{module_id}")
         return m.default_on if rec is None else bool(rec["enabled"])
@@ -87,7 +91,8 @@ class ModuleRegistry:
 
     def list(self, tenant_id: str = DEFAULT_TENANT) -> list:
         return [{"id": m.id, "name": m.name, "kind": m.kind, "prefixes": list(m.prefixes),
-                 "description": m.description, "enabled": self.enabled(m.id, tenant_id)}
+                 "description": m.description, "enabled": self.enabled(m.id, tenant_id),
+                 "broken": m.id in self.broken}
                 for m in sorted(self.modules.values(), key=lambda x: x.id)]
 
 

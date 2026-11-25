@@ -15,6 +15,10 @@ from .scopes import CORE_SCOPES, check_pack_scope
 from .version import SDK_VERSION, parse_range, parse_version, satisfies
 
 PACK_ID = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+LEGACY_ROUTE = re.compile(r"^(/[a-z0-9_-]+)+$")
+# Core routes: never owned by a module, so no module switch can hide them
+RESERVED_ROUTES = ("/api/v1", "/api/core", "/api/admin", "/api/files", "/api/search", "/api/status", "/api/grok",
+                   "/api/stt", "/mcp", "/rag", "/healthz", "/stream", "/admin", "/upload", "/theme")
 CONFIG_KEY = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
 _TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "list": list, "object": dict}
 
@@ -61,6 +65,14 @@ class Manifest(BaseModel):
     publishes: list[str] = Field(default_factory=list, description="its own events, '<id>.<verb>'")
     config: dict[str, ConfigItem] = Field(default_factory=dict)
     mcp_tools: list[McpTool] = Field(default_factory=list)
+    # ---- migration helpers (SDK 1.1)
+    load_after: list[str] = Field(default_factory=list,
+                                  description="load after these modules IF they exist (soft order, not a dependency)")
+    legacy: bool = Field(False, description="capability still uses the old register(app, ...) code through "
+                                            "ctx.legacy while it is being moved to the SDK (capabilities only)")
+    legacy_routes: list[str] = Field(default_factory=list,
+                                     description="old URL prefixes this capability owns, e.g. '/api/notes' - "
+                                                 "switched off together with the module")
 
     @field_validator("id")
     @classmethod
@@ -111,6 +123,13 @@ class Manifest(BaseModel):
                 raise ValueError(f"MCP tool {t.name!r} must start with '{self.id}_' so tools from packs never clash")
         if self.id in self.depends_on:
             raise ValueError("a module cannot depend on itself")
+        if (self.legacy or self.legacy_routes) and self.kind != "capability":
+            raise ValueError("only capabilities may use legacy code or legacy routes; a pack uses the SDK only")
+        for r in self.legacy_routes:
+            if not LEGACY_ROUTE.match(r):
+                raise ValueError(f"bad legacy route {r!r}: like '/api/notes' (no trailing '/')")
+            if any(r == c or r.startswith(c + "/") or c.startswith(r + "/") for c in RESERVED_ROUTES):
+                raise ValueError(f"legacy route {r!r} overlaps a Core route - Core routes can never be switched off")
         return self
 
     # ------------------------------------------------------------ used by the Core loader (Phase 5)

@@ -27,7 +27,7 @@
 <body>
 <main>
   <h1><span>Admin</span> · VR_RAG</h1>
-  <div class="sub">Storage, users and document permissions, connectors, and the MCP endpoint.</div>
+  <div class="sub">Storage, users and document permissions, packs and settings per organisation, connectors, and the MCP endpoint.</div>
   <div class="card"><h2>Admin token</h2>
     <div class="row"><input id="tok" type="password" placeholder="ADMIN_TOKEN or an admin user's token (not needed on this computer before users exist)" style="flex:1"><button id="save">Use</button></div>
     <div id="status" class="muted" style="margin-top:8px">Loading...</div></div>
@@ -45,6 +45,24 @@
     <div class="row" style="margin-top:12px"><select id="ctype"></select><input id="cname" placeholder="Name"></div>
     <div class="form" id="cform"></div>
     <div class="row" style="margin-top:8px"><button class="go" id="cadd">Save connector</button><span id="cmsg" class="muted"></span></div></div>
+
+  <div class="card"><h2>Organisation</h2>
+    <div class="row"><span class="muted">Show packs and settings for</span><select id="tenant"></select>
+      <span class="muted">(each organisation = one tenant; its data, switches and settings are separate)</span></div></div>
+
+  <div class="card"><h2>Packs &amp; capabilities</h2>
+    <div class="muted">Switch a feature on or off for the organisation above. Off = its pages, URLs and MCP tools disappear for
+      that organisation at once (no redeploy). Core features (search, answers, files, admin) can never be switched off.</div>
+    <div id="packs" style="margin-top:8px"></div></div>
+
+  <div class="card"><h2>Settings</h2>
+    <div class="muted">Global value &lt; organisation value. Leave empty and press <b>Reset</b> to go back to the inherited value.
+      Every change is kept in the audit log.</div>
+    <div id="config" style="margin-top:8px"></div></div>
+
+  <div class="card"><h2>Recent events</h2>
+    <div class="muted">What the Core announced (question answered, document changed, ...) and which modules listen.</div>
+    <div id="events" style="margin-top:8px"></div></div>
 
   <div class="card"><h2>MCP endpoint (for other AI assistants)</h2>
     <div class="muted">Tools: <code>list_documents</code>, <code>search_documents</code>, <code>get_page</code>, <code>ask_documents</code>.
@@ -76,8 +94,66 @@ async function load() {
     $('ctype').innerHTML = Object.entries(types).map(([k, v]) => `<option value="${k}" ${v.planned ? 'disabled' : ''}>${esc(v.label)}${v.planned ? ' - coming (needs credentials)' : ''}</option>`).join('');
     form();
   }
+  if (st.admin) await core();
   $('mcp').textContent = JSON.stringify({ mcpServers: { "vr-rag": { type: "http", url: location.origin + '/mcp', headers: st.mcp.token_required ? { Authorization: 'Bearer <MCP_TOKEN>' } : undefined } } }, null, 2);
 }
+const T = () => $('tenant').value || 'default';
+const badge = (st) => st === 'loaded' ? '<span class="ok">loaded</span>' : `<span class="bad">${esc(st)}</span>`;
+async function core() {
+  const [okT, t] = await api('/api/core/tenants');
+  if (!okT) { $('packs').innerHTML = '<div class="muted">Needs an admin token.</div>'; return; }
+  const cur = T();
+  $('tenant').innerHTML = t.tenants.map((x) => `<option value="${esc(x.id)}" ${x.id === cur ? 'selected' : ''}>${esc(x.name || x.id)} (${esc(x.id)})</option>`).join('');
+  const [, p] = await api('/api/core/packs?tenant_id=' + encodeURIComponent(T()));
+  $('packs').innerHTML = '<table><tr><th>Module</th><th>Kind</th><th>Version</th><th>State</th><th>Listens to</th><th>MCP tools</th><th>On</th></tr>' +
+    (p.packs || []).map((m) => `<tr><td><b>${esc(m.name)}</b><div class="muted">${esc(m.description || '')}${m.legacy ? ' · old code (being moved)' : ''}</div>
+      ${m.error ? `<div class="bad">${esc(m.error)}</div>` : ''}${m.last_error ? `<div class="warn">last listener error: ${esc(m.last_error.error)}</div>` : ''}</td>
+      <td>${esc(m.kind || '')}</td><td>${esc(m.version || '-')}</td><td>${badge(m.state)}</td>
+      <td class="muted">${esc((m.subscribes || []).join(', ') || '-')}</td><td class="muted">${esc((m.mcp_tools || []).join(', ') || '-')}</td>
+      <td><input type="checkbox" data-pack="${esc(m.id)}" ${m.enabled ? 'checked' : ''} ${m.state !== 'loaded' || m.broken ? 'disabled' : ''}></td></tr>`).join('') + '</table>';
+  const [, c] = await api('/api/core/config?tenant_id=' + encodeURIComponent(T()));
+  const vals = {}; (c.values || []).forEach((v) => { vals[v.scope + '|' + v.key] = v.value; });
+  const shown = (v) => v === undefined ? '' : (typeof v === 'string' ? v : JSON.stringify(v));
+  $('config').innerHTML = '<table><tr><th>Setting</th><th>Default</th><th>Global</th><th>This organisation</th><th></th></tr>' +
+    Object.entries(c.schema || {}).filter(([k]) => !k.startsWith('prompts.')).map(([k, sp]) => `<tr><td><code>${esc(k)}</code><div class="muted">${esc(sp.description || '')} (${esc(sp.type)})</div></td>
+      <td class="muted">${esc(shown(sp.default))}</td><td class="muted">${esc(shown(vals['global|' + k]))}</td>
+      <td><input data-cfg="${esc(k)}" data-type="${esc(sp.type)}" value="${esc(shown(vals['tenant:' + T() + '|' + k]))}" style="width:100%"></td>
+      <td class="row"><button data-cfgsave="${esc(k)}">Save</button><button data-cfgreset="${esc(k)}">Reset</button></td></tr>`).join('') + '</table>' +
+    '<div class="muted" style="margin-top:6px">Prompt texts (<code>prompts.*</code>) are edited through the API: PUT /api/core/config.</div>';
+  const [, ev] = await api('/api/core/events?limit=15&tenant_id=' + encodeURIComponent(T()));
+  $('events').innerHTML = `<div class="muted">delivered ${ev.stats ? ev.stats.delivered : 0} · failed ${ev.stats ? ev.stats.failed : 0} · dropped ${ev.stats ? ev.stats.dropped : 0}</div>` +
+    ((ev.events || []).length ? '<table><tr><th>When</th><th>Event</th><th>From</th><th>Details</th></tr>' + ev.events.map((e) =>
+      `<tr><td class="muted">${new Date(e.ts * 1000).toLocaleTimeString()}</td><td>${esc(e.name)}</td><td class="muted">${esc(e.source)}</td>
+       <td class="muted">${esc(JSON.stringify(e.data).slice(0, 160))}</td></tr>`).join('') + '</table>' : '<div class="muted">No events yet.</div>');
+}
+function parseVal(raw, type) {
+  if (type === 'string') return raw;
+  if (type === 'boolean') return raw === 'true';
+  if (type === 'integer' || type === 'number') return Number(raw);
+  return JSON.parse(raw);
+}
+$('tenant').onchange = core;
+document.addEventListener('change', async (e) => {
+  const t = e.target.closest('[data-pack]');
+  if (!t) return;
+  const [ok, r] = await api(`/api/core/tenants/${encodeURIComponent(T())}/packs/${t.dataset.pack}`, { method: 'PUT', body: JSON.stringify({ enabled: t.checked }) });
+  if (!ok) alert(r.error || 'failed');
+  core();
+});
+document.addEventListener('click', async (e) => {
+  const s = e.target.closest('[data-cfgsave],[data-cfgreset]');
+  if (!s) return;
+  const key = s.dataset.cfgsave || s.dataset.cfgreset;
+  if (s.dataset.cfgreset) {
+    await api(`/api/core/config?key=${encodeURIComponent(key)}&tenant_id=${encodeURIComponent(T())}`, { method: 'DELETE' });
+  } else {
+    const i = document.querySelector(`[data-cfg="${key}"]`);
+    let value; try { value = parseVal(i.value, i.dataset.type); } catch { return alert('Not valid JSON for this setting'); }
+    const [ok, r] = await api('/api/core/config', { method: 'PUT', body: JSON.stringify({ key, value, tenant_id: T() }) });
+    if (!ok) return alert(r.error || 'failed');
+  }
+  core();
+});
 function form() {
   const t = types[$('ctype').value];
   $('cform').innerHTML = t.fields.map((f) => `<label>${esc(f.label)}<input data-f="${f.name}" ${f.secret ? 'type="password"' : ''}></label>`).join('');

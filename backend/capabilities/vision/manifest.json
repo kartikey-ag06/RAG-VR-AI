@@ -1,0 +1,15 @@
+{
+  "id": "vision",
+  "name": "Photo questions",
+  "version": "1.0.0",
+  "kind": "capability",
+  "core": ">=1.1,<2.0",
+  "description": "Scan, then ask: describe a photo, then answer from the documents",
+  "legacy": true,
+  "legacy_routes": [
+    "/api/vision"
+  ],
+  "requires_scopes": [
+    "ai:vision"
+  ]
+}

@@ -50,7 +50,19 @@ for _t in TOOLS:                                     # every tool only reads: le
     _t["annotations"] = {"readOnlyHint": True, "openWorldHint": False}
 
 
-def register(app, store, search, llm, auth, core=None, identity=None):
+def register(app, store, search, llm, auth, core=None, identity=None, kernel=None):
+    """`kernel` (core.plugins.Kernel): tools contributed by capabilities and packs (Phase 5). A module's tools are
+    listed and callable only while that module is switched ON for the caller's tenant."""
+
+    def module_tools():
+        if kernel is None:
+            return {}
+        return {n: v for n, v in sorted(kernel.tools.items()) if kernel.modules.enabled(v[0])}
+
+    def tool_spec(t):
+        return {"name": t.name, "description": t.description, "inputSchema": t.input_schema,
+                "annotations": {"readOnlyHint": t.read_only, "openWorldHint": False}}
+
     def key_principal(req):
         """An API key (Bearer vrk_...) -> its principal; None when the caller does not send one.
         A wrong or revoked key raises PolicyDenied (401)."""
@@ -79,7 +91,10 @@ def register(app, store, search, llm, auth, core=None, identity=None):
         """MCP callers see public documents of the CURRENT TENANT only (no groups, same tenant - Phase 4)."""
         return bool(e) and not e.get("groups") and auth.can_see_doc(e, None)
 
-    def call_tool(name, a, base=""):
+    def call_tool(name, a, base="", req=None):
+        extra = module_tools()
+        if name in extra:
+            return extra[name][2](req, a)
         if name == "list_documents":
             docs = [{"doc_uid": d["uid"], "title": d["title"], "pages": d["pages"], "type": d["type"], "machine_ids": d.get("tags", [])}
                     for d in store.snapshot["index"]["docs"] if shown(d)]
@@ -121,7 +136,7 @@ def register(app, store, search, llm, auth, core=None, identity=None):
                 raise ValueError("question is required")
             style = str(a.get("style") or "full").lower()
             out = core["answer"](q, a.get("machine_id"), style if style in ("full", "glance", "spoken") else "full",
-                                 str(a.get("lang") or "")[:30], None)
+                                 str(a.get("lang") or "")[:30], None, door="mcp")
             refs = "\n".join(f"[{c['n']}] {c['title']}, page {c['page']} (doc_uid {c['doc_uid']}) {base}{c['image_url']}"
                              for c in out["citations"])
             label = {"pdf": "From the documents", "general": "General knowledge (not in the documents)",
@@ -139,7 +154,7 @@ def register(app, store, search, llm, auth, core=None, identity=None):
             return f"{ans.strip()}\n\nSources:\n{refs}"
         raise ValueError(f"unknown tool {name}")
 
-    def handle(msg, base="", can_ask=True):
+    def handle(msg, base="", can_ask=True, req=None):
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
             return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
         mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
@@ -156,12 +171,12 @@ def register(app, store, search, llm, auth, core=None, identity=None):
         if method == "ping":
             return ok({})
         if method == "tools/list":
-            return ok({"tools": TOOLS})
+            return ok({"tools": TOOLS + [tool_spec(v[1]) for v in module_tools().values()]})
         if method == "tools/call":
             try:
                 if params.get("name") == "ask_documents" and not can_ask:
                     raise ValueError("this API key lacks the scope 'ai:ask'")
-                out = call_tool(params.get("name"), params.get("arguments") or {}, base)
+                out = call_tool(params.get("name"), params.get("arguments") or {}, base, req)
                 content = out if isinstance(out, list) else [{"type": "text", "text": out}]
                 return ok({"content": content, "isError": False})
             except Exception as e:
@@ -184,9 +199,9 @@ def register(app, store, search, llm, auth, core=None, identity=None):
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
         base = (os.environ.get("PUBLIC_URL") or str(req.base_url)).rstrip("/")
         if isinstance(body, list):
-            out = [r for r in (handle(m, base, can_ask) for m in body) if r is not None]
+            out = [r for r in (handle(m, base, can_ask, req) for m in body) if r is not None]
             return JSONResponse(out) if out else Response(status_code=202)
-        r = handle(body, base, can_ask)
+        r = handle(body, base, can_ask, req)
         if r is None:
             return Response(status_code=202)
         headers = {}

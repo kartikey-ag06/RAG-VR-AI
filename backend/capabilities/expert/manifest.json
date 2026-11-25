@@ -1,0 +1,14 @@
+{
+  "id": "expert",
+  "name": "Remote expert",
+  "version": "1.0.0",
+  "kind": "capability",
+  "core": ">=1.1,<2.0",
+  "description": "Live video help from an expert (WebRTC)",
+  "legacy": true,
+  "legacy_routes": [
+    "/api/expert",
+    "/expert"
+  ],
+  "requires_scopes": []
+}

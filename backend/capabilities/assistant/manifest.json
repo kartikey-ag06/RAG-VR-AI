@@ -1,0 +1,23 @@
+{
+  "id": "assistant",
+  "name": "Assistant",
+  "version": "1.0.0",
+  "kind": "capability",
+  "core": ">=1.1,<2.0",
+  "description": "Reminders, notes, weather, translate, today's calendar",
+  "legacy": true,
+  "legacy_routes": [
+    "/api/assistant",
+    "/api/calendar",
+    "/api/notes",
+    "/api/reminders",
+    "/api/translate",
+    "/api/weather"
+  ],
+  "requires_scopes": [
+    "ai:ask"
+  ],
+  "load_after": [
+    "calendar_sync"
+  ]
+}

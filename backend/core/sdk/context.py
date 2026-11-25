@@ -153,7 +153,18 @@ class CoreContext(Protocol):
         """The one RAG pipeline (search -> prompt -> AI -> citations). Emits 'question.asked'."""
 
     def call(self, request, function: str, **kwargs) -> Any:
-        """Call a function another module published, e.g. ctx.call(req, "assistant.create_reminder", text=...)."""
+        """Call a function another module published, e.g. ctx.call(req, "assistant.create_reminder", text=...).
+        The other module must be listed in this module's depends_on and be switched ON for the tenant."""
+
+    # ---- added in SDK 1.1 (Phase 5)
+    prompts: Any                                # .register(name, default) / .get(name): '<module_id>.<name>' prompts
+
+    def publish_function(self, name: str) -> Callable:
+        """Decorator: let other modules call fn(request, **kwargs) as '<module_id>.<name>'."""
+
+    def mcp_tool(self, name: str) -> Callable:
+        """Decorator: the handler fn(request, arguments) -> text for an MCP tool declared in the manifest.
+        The tool is listed and callable only while the module is ON for the caller's tenant."""
 
 
 def iter_scopes(principals: Iterable[Principal]) -> set:

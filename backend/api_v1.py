@@ -125,7 +125,7 @@ def extractive(hits, n=3):
     return "\n".join(out)
 
 
-def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None, config=None):
+def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None, config=None, prompts=None, events=None):
     lock = threading.Lock()
     thumbs = OrderedDict()                       # resized page images, LRU (small displays ask for the same pages)
 
@@ -183,7 +183,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     def find(query, k, machine, user):
         return run_search(query, max(1, min(20, int(k or 6))), str(machine or "")[:80], user)
 
-    prompts = PromptRegistry(config)                       # tenant can override these texts via config (Phase 4)
+    prompts = prompts or PromptRegistry(config)            # tenant can override these texts via config (Phase 4)
     prompts.register("answer.system", SMART_SYSTEM, "System prompt for document answers")
     prompts.register("answer.vision_rule", VISION_RULE, "Extra rule added when a photo is attached")
 
@@ -219,7 +219,26 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         return {"answer": extractive(hits), "mode": "offline", "citations": [citation(h, i + 1) for i, h in enumerate(hits[:3])],
                 "confidence": res.get("conf"), "search_mode": res.get("mode"), "note": note}
 
-    def answer(question, machine, style, lang, user, photo=None, k=6, given=None):
+    def asked(question, out, hits, door):
+        """Tell the Core event bus an answer was produced ("question.asked", Phase 5) - modules such as the
+        Industrial pack listen instead of the client reporting it. Never breaks or slows the answer."""
+        if events is None:
+            return
+        try:
+            events("question.asked", {
+                "question": question[:300], "door": door, "mode": out.get("mode"),
+                "confidence": out.get("confidence"), "search_mode": out.get("search_mode"),
+                "cited": [{"doc_uid": c["doc_uid"], "page": c["page"]} for c in out.get("citations", [])],
+                "candidates": [{"doc_uid": h["uid"], "page": h["page"]} for h in hits[:6]]})
+        except Exception:
+            pass
+
+    def answer(question, machine, style, lang, user, photo=None, k=6, given=None, door="v1"):
+        out, hits = _answer(question, machine, style, lang, user, photo, k, given)
+        asked(question, out, hits, door)
+        return out
+
+    def _answer(question, machine, style, lang, user, photo=None, k=6, given=None):
         """The one RAG pipeline every door uses: search -> Groq -> parsed answer with citations.
         `given` = (hits, positions) from passages_of(): the client already searched, skip the search."""
         positions = None
@@ -232,14 +251,14 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             res = find(query, k, machine, user)
             hits = res["hits"][:k]
         if not provider():
-            return offline(hits, res, "no AI key on the server")
+            return offline(hits, res, "no AI key on the server"), hits
         try:
             raw = llm_complete(messages(question, hits, style, lang, photo), 900)
         except BudgetExceeded as e:
-            return offline(hits, res, e.reason)
+            return offline(hits, res, e.reason), hits
         except Exception as e:
-            return offline(hits, res, f"AI error: {e}")
-        return result(raw, hits, res, positions=positions)
+            return offline(hits, res, f"AI error: {e}"), hits
+        return result(raw, hits, res, positions=positions), hits
 
     def question_of(b, key="question"):
         q = str(b.get(key) or b.get("query") or "").strip()[:MAX_Q]
@@ -368,8 +387,12 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         def gen():
             yield sse("meta", {"search_mode": res.get("mode"), "confidence": res.get("conf"),
                                "candidates": [citation(h, n + 1) for n, h in enumerate(hits)]})
+            def done(out):
+                asked(q, out, hits, "v1")
+                return sse("done", out)
+
             if not provider():
-                yield sse("done", offline(hits, res, "no AI key on the server"))
+                yield done(offline(hits, res, "no AI key on the server"))
                 return
             raw = []
             try:
@@ -377,11 +400,12 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                     raw.append(piece)
                     yield sse("delta", {"text": piece, "answer_so_far": clean_body("".join(raw))})
             except BudgetExceeded as e:
-                yield sse("done", offline(hits, res, e.reason))
-            except Exception as e:
-                yield sse("done", offline(hits, res, f"AI error: {e}"))
+                yield done(offline(hits, res, e.reason))
                 return
-            yield sse("done", result("".join(raw), hits, res, positions=positions))
+            except Exception as e:
+                yield done(offline(hits, res, f"AI error: {e}"))
+                return
+            yield done(result("".join(raw), hits, res, positions=positions))
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -393,6 +417,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             return denied(user)
         if not vision:
             return JSONResponse({"error": "photo questions are not available on this server"}, 501)
+        if vision.get("enabled") and not vision["enabled"]():
+            return JSONResponse({"error": "not found", "detail": "module vision is not enabled for this tenant"}, 404)
         b = _body or {}
         image = b.get("image")
         bad = vision["check"](image)
@@ -406,7 +432,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 502)
-        out = answer(q, b.get("machine_id"), style, lang, user, photo=photo)
+        out = answer(q, b.get("machine_id"), style, lang, user, photo=photo, door="scan")
         out["photo"] = {k: photo.get(k, "") for k in ("object", "details", "text_seen")}
         return out
 

@@ -1,0 +1,9 @@
+{
+  "id": "legacy_pack",
+  "name": "Legacy Pack",
+  "version": "0.1.0",
+  "kind": "pack",
+  "core": ">=1.1,<2.0",
+  "legacy": true,
+  "description": "A pack may not use legacy code"
+}
