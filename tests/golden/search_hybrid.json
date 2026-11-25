@@ -1,0 +1,289 @@
+{
+ "13,00,00,000": {
+  "conf": 0.508,
+  "hits": [
+   {
+    "kw": 0.3645,
+    "page": 93,
+    "score": 0.02883,
+    "sem": 0.4212,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.3107,
+    "page": 13,
+    "score": 0.0287,
+    "sem": 0.5085,
+    "title": "2014-08 Adjudication Order RIL Diluted EPS NonDisclosure"
+   },
+   {
+    "kw": 0.3645,
+    "page": 35,
+    "score": 0.02829,
+    "sem": 0.3402,
+    "title": "2017-03 Order Reliance Petroleum SAT"
+   },
+   {
+    "kw": 0.291,
+    "page": 36,
+    "score": 0.02764,
+    "sem": 0.3682,
+    "title": "2017-03 Order Reliance Petroleum SAT"
+   },
+   {
+    "kw": 0.4072,
+    "page": 15,
+    "score": 0.02761,
+    "sem": 0.2789,
+    "title": "2014-08 Adjudication Order RIL Diluted EPS NonDisclosure"
+   }
+  ],
+  "low": true
+ },
+ "15HB": {
+  "conf": 0.451,
+  "hits": [
+   {
+    "kw": 0.0,
+    "page": 23,
+    "score": 0.01639,
+    "sem": 0.4508,
+    "title": "2014-06 Order Reliance Industries"
+   },
+   {
+    "kw": 0.0,
+    "page": 24,
+    "score": 0.01613,
+    "sem": 0.4232,
+    "title": "2014-06 Order Reliance Industries"
+   },
+   {
+    "kw": 0.0,
+    "page": 25,
+    "score": 0.01587,
+    "sem": 0.3914,
+    "title": "2014-06 Order Reliance Industries"
+   },
+   {
+    "kw": 0.0,
+    "page": 42,
+    "score": 0.01562,
+    "sem": 0.3221,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.0,
+    "page": 37,
+    "score": 0.01538,
+    "sem": 0.3203,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   }
+  ],
+  "low": true
+ },
+ "Bombay High Court appeal": {
+  "conf": 0.249,
+  "hits": [
+   {
+    "kw": 0.2974,
+    "page": 8,
+    "score": 0.0274,
+    "sem": 0.2241,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.2692,
+    "page": 8,
+    "score": 0.02639,
+    "sem": 0.2092,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.2905,
+    "page": 8,
+    "score": 0.02603,
+    "sem": 0.2024,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.1721,
+    "page": 61,
+    "score": 0.02531,
+    "sem": 0.2372,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.1258,
+    "page": 25,
+    "score": 0.02528,
+    "sem": 0.2494,
+    "title": "2014-06 Order Reliance Industries"
+   }
+  ],
+  "low": true
+ },
+ "Reliance Petroleum": {
+  "conf": 0.298,
+  "hits": [
+   {
+    "kw": 0.2807,
+    "page": 1,
+    "score": 0.02829,
+    "sem": 0.2979,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.1207,
+    "page": 41,
+    "score": 0.02582,
+    "sem": 0.2274,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.0757,
+    "page": 1,
+    "score": 0.02574,
+    "sem": 0.2375,
+    "title": "2020-09 Adjudication Order BH Kothari Reliance Industries"
+   },
+   {
+    "kw": 0.1068,
+    "page": 3,
+    "score": 0.02527,
+    "sem": 0.2274,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.0734,
+    "page": 15,
+    "score": 0.02496,
+    "sem": 0.2368,
+    "title": "2017-03 Order Reliance Petroleum SAT"
+   }
+  ],
+  "low": true
+ },
+ "diluted EPS non disclosure": {
+  "conf": 0.23,
+  "hits": [
+   {
+    "kw": 0.1197,
+    "page": 31,
+    "score": 0.02462,
+    "sem": 0.1998,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.1336,
+    "page": 34,
+    "score": 0.02381,
+    "sem": 0.1755,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.1381,
+    "page": 9,
+    "score": 0.02287,
+    "sem": 0.1609,
+    "title": "2014-08 Adjudication Order RIL Diluted EPS NonDisclosure"
+   },
+   {
+    "kw": 0.0684,
+    "page": 8,
+    "score": 0.02247,
+    "sem": 0.2297,
+    "title": "2014-08 Adjudication Order RIL Diluted EPS NonDisclosure"
+   },
+   {
+    "kw": 0.1619,
+    "page": 1,
+    "score": 0.02063,
+    "sem": 0.135,
+    "title": "2014-08 Adjudication Order RIL Diluted EPS NonDisclosure"
+   }
+  ],
+  "low": true
+ },
+ "insider trading": {
+  "conf": 0.387,
+  "hits": [
+   {
+    "kw": 0.24,
+    "page": 61,
+    "score": 0.02951,
+    "sem": 0.3873,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.1388,
+    "page": 42,
+    "score": 0.02825,
+    "sem": 0.3,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.0879,
+    "page": 16,
+    "score": 0.02574,
+    "sem": 0.2673,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.0888,
+    "page": 35,
+    "score": 0.02272,
+    "sem": 0.2196,
+    "title": "2017-03 Order Reliance Petroleum SAT"
+   },
+   {
+    "kw": 0.1675,
+    "page": 4,
+    "score": 0.02222,
+    "sem": 0.1952,
+    "title": "2014-06 Order Reliance Industries"
+   }
+  ],
+  "low": true
+ },
+ "penalty": {
+  "conf": 0.349,
+  "hits": [
+   {
+    "kw": 0.2123,
+    "page": 93,
+    "score": 0.02751,
+    "sem": 0.3492,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.1999,
+    "page": 94,
+    "score": 0.02652,
+    "sem": 0.2471,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.276,
+    "page": 32,
+    "score": 0.02577,
+    "sem": 0.189,
+    "title": "2021-04 Adjudication Order Reliance Industries Ltd"
+   },
+   {
+    "kw": 0.1942,
+    "page": 93,
+    "score": 0.02504,
+    "sem": 0.2243,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   },
+   {
+    "kw": 0.2185,
+    "page": 93,
+    "score": 0.0247,
+    "sem": 0.1794,
+    "title": "2021-01 Adjudication Order 4 Entities Reliance Petroleum"
+   }
+  ],
+  "low": true
+ }
+}
