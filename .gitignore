@@ -23,3 +23,5 @@ _*.tgz
 
 _*.md5
 vite.config.js.timestamp-*
+.neon
+node_modules/
