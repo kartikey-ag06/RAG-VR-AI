@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 import webbrowser
-from collections import Counter, OrderedDict
+from collections import Counter
 import gzip
 import hashlib
 from pathlib import Path
@@ -47,67 +47,64 @@ if str(BACKEND_DIR) not in sys.path:
 import numpy as np
 import requests
 import uvicorn
-from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from indexer import Store, tokenize
+from core.kernel import Container, Settings, create_app
 
-ROOT = Path(__file__).resolve().parent.parent
-APP_DIR = ROOT / ("web" if "--app=web" in sys.argv else "glasses_app/dist")
-EMBED_MODEL = os.environ.get("VR_RAG_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+# ---------------------------------------------------------------- settings + app shell (core/kernel)
+SETTINGS = Settings.from_env(Path(__file__).resolve().parent.parent, sys.argv, os.environ)
+ROOT = SETTINGS.root
+APP_DIR = SETTINGS.app_dir
+EMBED_MODEL = SETTINGS.embed_model
+DATA_DIR = SETTINGS.data_dir          # VR_RAG_DATA_DIR moves the document store + app data (tests use a temp folder)
 RRF_K = 60            # standard RRF constant
 W_SEMANTIC = 1.0      # weight of the embedding ranking
 W_KEYWORD = 0.8       # weight of the TF-IDF ranking (exact terms like "15HB", "13,00,00,000")
 
-app = FastAPI(title="VR_RAG backend")
 limits.setup_logging()
-
-# Load protection (rate limits, body-size limits, AI budget + concurrency, request ids). Added BEFORE CORS so CORS
-# stays the outermost layer: a 429 / 413 answer still carries CORS headers and the browser can show its message.
-app.add_middleware(LoadGuard)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$|^https://.*\.onrender\.com$",
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Retry-After", "X-Request-ID", "ETag"],
-    max_age=600,
-)
-
-
-@app.get("/healthz")
-def healthz():
-    """Cheap liveness check for Render / uptime monitors: no disk, no database, no AI."""
-    return {"ok": True}
+# Load protection (rate limits, body-size limits, AI budget + concurrency, request ids) sits INSIDE CORS, so a
+# 429 / 413 answer still carries CORS headers and the browser can show its message. /healthz comes from the factory.
+app = create_app(SETTINGS, middleware=[(LoadGuard, {})])
 
 
 @app.on_event("startup")
 def on_startup():
     threading.Thread(target=load_embeddings, daemon=True).start()
 
-# ---------------------------------------------------------------- document store (uploads) + TF-IDF
-# VR_RAG_DATA_DIR moves the whole document store + app data (tests use a temporary folder). Default unchanged.
-DATA_DIR = Path(os.environ["VR_RAG_DATA_DIR"]) if os.environ.get("VR_RAG_DATA_DIR") else ROOT / "backend" / "data"
-
+# ---------------------------------------------------------------- shared services (built once, in this order)
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
 from db import DB, LocalKV, database_url
-DBX = None
-if database_url(ROOT) and os.environ.get("VR_RAG_NO_DB") != "1":
+from auth import Auth
+
+
+def _make_db(c):
+    if not database_url(ROOT) or SETTINGS.no_db:
+        return None
     try:
-        DBX = DB(database_url(ROOT))
+        db = DB(database_url(ROOT))
         print("[db] connected: documents, vectors and app data are stored in Postgres (pgvector)", flush=True)
+        return db
     except Exception as _e:
         print(f"[db] NOT available, using local files only: {_e}", flush=True)
-STORE = Store(DATA_DIR, seed_dir=ROOT / "docs", db=DBX)   # first run imports the 10 original PDFs from docs/
-KV = DBX or LocalKV(DATA_DIR)                             # small records: reminders, pins, sessions...
+        return None
 
-from auth import Auth
-AUTH = Auth(KV)
+
+SERVICES = Container()
+SERVICES.register("db", _make_db)
+SERVICES.register("store", lambda c: Store(SETTINGS.data_dir, seed_dir=SETTINGS.seed_dir, db=c.get("db")))
+SERVICES.register("kv", lambda c: c.get("db") or LocalKV(SETTINGS.data_dir))   # reminders, pins, sessions...
+SERVICES.register("auth", lambda c: Auth(c.get("kv")))
+app.state.services = SERVICES
+
+# old global names kept as aliases, so feature modules and tests keep working unchanged
+DBX = SERVICES.get("db")
+STORE = SERVICES.get("store")        # first run imports the 10 original PDFs from docs/
+KV = SERVICES.get("kv")
+AUTH = SERVICES.get("auth")
 LOW_CONFIDENCE = 0.62     # best semantic match below this = "low confidence" (bge-small cosine similarity)
 
 
@@ -406,76 +403,20 @@ def rag_page(name: str, req: Request):
     return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
-# ---------------------------------------------------------------- LLM provider (Groq / Grok)
+# ---------------------------------------------------------------- LLM provider (Groq / Grok) -> core/ai
+from core.ai import AIGateway, SseReader, clean_messages
+
 KEY_FILE = ROOT / "grok_api_key.txt"
 MODEL_FILE = ROOT / "grok_model.txt"
-_cache = {"chat": None, "stt": None}
+# key_file / model_file are read through these lambdas so a test can still swap KEY_FILE / MODEL_FILE on this module
+AI = AIGateway(HTTP, os.environ, key_file=lambda: KEY_FILE, model_file=lambda: MODEL_FILE, log=log)
 
-
-def get_key():
-    for env in ("XAI_API_KEY", "GROQ_API_KEY"):
-        if os.environ.get(env):
-            return os.environ[env].strip()
-    if KEY_FILE.exists():
-        line = KEY_FILE.read_text(encoding="utf-8-sig").splitlines()[:1]
-        if line and re.match(r"^(xai-|gsk_)", line[0].strip()):
-            return line[0].strip()
-    return None
-
-
-def provider():
-    k = get_key()
-    if not k:
-        return None
-    if k.startswith("gsk_"):
-        return {"name": "groq", "base": "https://api.groq.com/openai/v1"}
-    return {"name": "grok", "base": "https://api.x.ai/v1"}
-
-
-_MODELS = {"ids": None, "t": 0.0}
-
-
-def list_models():
-    """The account's model list, fetched once per 10 minutes (chat, voice and photo all need it)."""
-    if _MODELS["ids"] is not None and time.time() - _MODELS["t"] < 600:
-        return _MODELS["ids"]
-    p = provider()
-    if not p:
-        raise RuntimeError("no AI key configured (set GROQ_API_KEY or put a key in grok_api_key.txt)")
-    r = HTTP.get(f"{p['base']}/models", headers={"Authorization": f"Bearer {get_key()}"}, timeout=20)
-    r.raise_for_status()
-    _MODELS.update(ids=[m["id"] for m in r.json().get("data", [])], t=time.time())
-    return _MODELS["ids"]
-
-
-def chat_model():
-    if MODEL_FILE.exists() and MODEL_FILE.read_text().strip():
-        return MODEL_FILE.read_text().strip().splitlines()[0]
-    p = provider()
-    if not p:
-        return ""
-    if p["name"] == "grok":
-        return "grok-4.7"
-    if not _cache["chat"]:
-        prefer = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
-        try:
-            ids = list_models()
-            _cache["chat"] = next((m for m in prefer if m in ids), None) or next(
-                (m for m in ids if not re.search("whisper|tts|guard|embed", m)), prefer[0])
-        except Exception:
-            return prefer[0]
-    return _cache["chat"]
-
-
-def stt_model():
-    if not _cache["stt"]:
-        try:
-            ids = list_models()
-            _cache["stt"] = next((m for m in ["whisper-large-v3-turbo", "whisper-large-v3"] if m in ids), None) or next(
-                (m for m in ids if "whisper" in m), "whisper-large-v3-turbo")
-        except Exception:
-            return "whisper-large-v3-turbo"
-    return _cache["stt"]
+# old names kept as aliases: feature modules (vision, api_v1, procops, ...) and tests use them unchanged
+get_key, provider, list_models = AI.get_key, AI.provider, AI.list_models
+chat_model, stt_model, fast_model = AI.chat_model, AI.stt_model, AI.fast_model
+llm_complete, llm_stream = AI.complete, AI.stream
+_cache, _MODELS, _ANSWERS = AI.model_choice, AI.models_cache, AI.answers
+_clean_messages = clean_messages
 
 
 @app.get("/api/grok/status")
@@ -502,114 +443,45 @@ def models():
         return JSONResponse({"error": "could not load the model list from the AI provider"}, status_code=502)
 
 
-def fast_model():
-    """A smaller, faster model for quick jobs (voice-command routing, translation): ~3x faster than the main one."""
-    if _cache.get("fast") is None:
-        try:
-            ids = list_models()
-            _cache["fast"] = next((m for m in ["openai/gpt-oss-20b", "llama-3.1-8b-instant"] if m in ids), "") or ""
-        except Exception:
-            return chat_model()
-    return _cache["fast"] or chat_model()
-
-
-def _chat_payload(messages, max_tokens=700, stream=False, model=None):
-    model = model or chat_model()
-    payload = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
-    if "gpt-oss" in model:
-        payload["reasoning_effort"] = "low"        # short hidden "thinking": ~2x faster first word, same answers
-    if stream:
-        payload["stream"] = True
-    return payload
-
-
-_ANSWERS = OrderedDict()                            # same question + same excerpts -> instant answer (LRU, 200)
-
-
-def _cache_key(messages):
-    return hashlib.sha1(json.dumps([chat_model(), messages], sort_keys=True).encode()).hexdigest()
-
-
-def _remember(key, text):
-    if text and not text.startswith("AI error"):
-        _ANSWERS[key] = text
-        _ANSWERS.move_to_end(key)
-        while len(_ANSWERS) > 200:
-            _ANSWERS.popitem(last=False)
-
-
-MAX_MESSAGES, MAX_PROMPT_CHARS = 24, 60000
-
-
-def _clean_messages(body):
-    """Only well-formed chat messages reach Groq: a list of {role, content} strings, bounded in count and size.
-    Returns (messages, error)."""
-    msgs = (body or {}).get("messages")
-    if not isinstance(msgs, list) or not msgs or len(msgs) > MAX_MESSAGES:
-        return None, f"'messages' must be a list of 1-{MAX_MESSAGES} chat messages"
-    out, total = [], 0
-    for m in msgs:
-        if not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant") or not isinstance(m.get("content"), str):
-            return None, "each message needs a role (system/user/assistant) and text content"
-        total += len(m["content"])
-        out.append({"role": m["role"], "content": m["content"]})
-    if total > MAX_PROMPT_CHARS:
-        return None, f"prompt too long ({total} characters, max {MAX_PROMPT_CHARS})"
-    return out, ""
-
-
-# Single flight: when the same question arrives several times at once (double tap, two workers, a retry), only the
-# first one calls Groq; the others wait for its answer instead of paying for it again.
-_INFLIGHT = {}
-_INFLIGHT_LOCK = threading.Lock()
+def _rate_limited():
+    return JSONResponse({"error": "the AI provider is rate limiting us - try again in a minute", "retry_after": 30}, 503,
+                        headers={"Retry-After": "30"})
 
 
 @app.post("/api/grok")
 def grok(req: Request, _body=JSONB):
+    # CHANGES IN PHASE 4 (ADR 0004): this raw proxy forwards any client system prompt; it becomes admin-only.
     if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
         return JSONResponse({"error": "unauthorized"}, 401)
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key. Put a Groq (gsk_...) or xAI (xai-...) key in grok_api_key.txt"}, 400)
-    messages, err = _clean_messages(_body)
+    messages, err = clean_messages(_body)
     if err:
         return JSONResponse({"error": err}, 400)
-    key = _cache_key(messages)
-    if key in _ANSWERS:
-        return {"choices": [{"message": {"role": "assistant", "content": _ANSWERS[key]}}], "cached": True}
-    with _INFLIGHT_LOCK:
-        waiter = _INFLIGHT.get(key)
-        if waiter is None:
-            _INFLIGHT[key] = threading.Event()
-    if waiter is not None:                       # same question already on its way to Groq: wait for that answer
-        waiter.wait(95)
-        if key in _ANSWERS:
-            return {"choices": [{"message": {"role": "assistant", "content": _ANSWERS[key]}}], "cached": True, "shared": True}
-    try:
+    key = AI.cache_key(messages)
+    if AI.cached(key) is not None:
+        return {"choices": [{"message": {"role": "assistant", "content": AI.cached(key)}}], "cached": True}
+    with AI.single_flight(key) as leader:
+        if not leader:                       # same question was already on its way: use that answer
+            if AI.cached(key) is not None:
+                return {"choices": [{"message": {"role": "assistant", "content": AI.cached(key)}}], "cached": True, "shared": True}
         try:
-            r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages),
-                          headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
+            r = AI.post_chat(messages)
         except Exception as e:
             log.warning("AI provider unreachable: %s", e)
             return JSONResponse({"error": f"{p['name']} is unreachable - try again shortly"}, 502)
         if r.status_code == 429:
-            return JSONResponse({"error": "the AI provider is rate limiting us - try again in a minute", "retry_after": 30}, 503,
-                                headers={"Retry-After": "30"})
+            return _rate_limited()
         if r.status_code != 200:
             log.warning("AI provider HTTP %s: %s", r.status_code, r.text[:300])
             return JSONResponse({"error": f"{p['name']} API error (HTTP {r.status_code})"}, 502)
         j = r.json()
         try:
-            _remember(key, j["choices"][0]["message"]["content"] or "")
+            AI.remember(key, j["choices"][0]["message"]["content"] or "")
         except Exception:
             pass
         return j
-    finally:
-        if waiter is None:
-            with _INFLIGHT_LOCK:
-                ev = _INFLIGHT.pop(key, None)
-            if ev:
-                ev.set()
 
 
 @app.post("/api/grok/stream")
@@ -620,15 +492,14 @@ def grok_stream(req: Request, _body=JSONB):
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key in grok_api_key.txt"}, 400)
-    messages, err = _clean_messages(_body)
+    messages, err = clean_messages(_body)
     if err:
         return JSONResponse({"error": err}, 400)
-    key = _cache_key(messages)
-    if key in _ANSWERS:
-        return Response(_ANSWERS[key], media_type="text/plain; charset=utf-8", headers={"X-Cache": "hit"})
+    key = AI.cache_key(messages)
+    if AI.cached(key) is not None:
+        return Response(AI.cached(key), media_type="text/plain; charset=utf-8", headers={"X-Cache": "hit"})
     try:
-        r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages, stream=True), stream=True,
-                      headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
+        r = AI.post_chat(messages, stream=True)
     except Exception as e:
         log.warning("AI provider unreachable: %s", e)
         return JSONResponse({"error": f"{p['name']} is unreachable - try again shortly"}, 502)
@@ -636,36 +507,20 @@ def grok_stream(req: Request, _body=JSONB):
         txt = r.text[:300]
         r.close()
         if r.status_code == 429:
-            return JSONResponse({"error": "the AI provider is rate limiting us - try again in a minute", "retry_after": 30}, 503,
-                                headers={"Retry-After": "30"})
+            return _rate_limited()
         log.warning("AI provider HTTP %s: %s", r.status_code, txt)
         return JSONResponse({"error": f"{p['name']} API error (HTTP {r.status_code})"}, 502)
 
-    r.encoding = "utf-8"            # SSE has no charset: without this, ’ “ ₹ and Hindi text arrive garbled
-
     def gen():
-        out, complete = [], False
+        out, reader = [], SseReader(r)
         try:
-            for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    complete = True
-                    break
-                try:
-                    piece = (json.loads(data)["choices"][0].get("delta") or {}).get("content") or ""
-                except Exception:
-                    continue
-                if piece:
-                    out.append(piece)
-                    yield piece
-            else:
-                complete = True
+            for piece in reader:
+                out.append(piece)
+                yield piece
         finally:
-            r.close()                   # also runs when the user presses Stop: Groq stops sending at once
-            if complete:                # never cache a half answer (stopped by the user)
-                _remember(key, "".join(out))
+            r.close()                   # also runs when the user presses Stop: the provider stops sending at once
+            if reader.complete:         # never cache a half answer (stopped by the user)
+                AI.remember(key, "".join(out))
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
@@ -686,10 +541,7 @@ async def stt(req: Request):
     hint = (req.query_params.get("prompt") or "")[:200]          # vocabulary hint: Whisper then spells "Hey Glasses" right
     ext = {"audio/ogg": "ogg", "audio/mp4": "m4a", "audio/wav": "wav", "audio/mpeg": "mp3"}.get(mime, "webm")
     try:
-        r = await run_in_threadpool(HTTP.post, f"{p['base']}/audio/transcriptions", headers={"Authorization": f"Bearer {get_key()}"},
-                          files={"file": (f"speech.{ext}", audio, mime)},
-                          data=dict({"model": stt_model(), "response_format": "json", "temperature": "0"},
-                                    **({"language": lang} if lang else {}), **({"prompt": hint} if hint else {})), timeout=60)
+        r = await run_in_threadpool(AI.transcribe, audio, mime, ext, lang, hint)
     except Exception as e:
         log.warning("speech-to-text unreachable: %s", e)
         return JSONResponse({"error": "speech service unreachable - try again shortly"}, 502)
@@ -702,50 +554,6 @@ async def stt(req: Request):
 
 
 # ---------------------------------------------------------------- ProcOps (question log, heatmap, AI redline, versions)
-def llm_complete(messages, max_tokens=1200, fast=False):
-    """Server-side chat call used by ProcOps. Returns the reply text or raises."""
-    p = provider()
-    if not p:
-        raise RuntimeError("no API key in grok_api_key.txt")
-    payload = _chat_payload(messages, max_tokens, model=fast_model() if fast else None)
-    r = HTTP.post(f"{p['base']}/chat/completions", json=payload,
-                      headers={"Authorization": f"Bearer {get_key()}"}, timeout=120)
-    if r.status_code != 200:
-        log.warning("AI provider HTTP %s: %s", r.status_code, r.text[:300])
-        raise RuntimeError("the AI provider is busy - try again in a minute" if r.status_code == 429
-                           else f"{p['name']} API error (HTTP {r.status_code})")
-    return r.json()["choices"][0]["message"]["content"] or ""
-
-
-def llm_stream(messages, max_tokens=700):
-    """Server-side streamed chat call (used by /api/v1/ask/stream). Yields text pieces as they arrive."""
-    p = provider()
-    if not p:
-        raise RuntimeError("no API key in grok_api_key.txt")
-    r = HTTP.post(f"{p['base']}/chat/completions", json=_chat_payload(messages, max_tokens, stream=True), stream=True,
-                  headers={"Authorization": f"Bearer {get_key()}"}, timeout=90)
-    if r.status_code != 200:
-        txt = r.text[:300]
-        r.close()
-        raise RuntimeError(f"{p['name']} API: HTTP {r.status_code} - {txt}")
-    r.encoding = "utf-8"
-    try:
-        for line in r.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                piece = (json.loads(data)["choices"][0].get("delta") or {}).get("content") or ""
-            except Exception:
-                continue
-            if piece:
-                yield piece
-    finally:
-        r.close()
-
-
 try:
     import procops
     procops.register(app, STORE, llm_complete, ROOT, AUTH)
