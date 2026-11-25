@@ -1,6 +1,6 @@
 # 0004 - All AI calls go through the Core AI gateway
 
-Status: Proposed (24 Nov 2026) - business decision taken: `/api/grok` becomes admin-only.
+Status: Accepted (24 Nov 2026). Implemented 25 Nov 2026: glasses use `/api/v1/ask` (#13); `/api/grok` admin-only.
 
 ## Context
 The glasses app builds its own system prompt (a SEBI legal-assistant prompt in `glasses_app/src/rag.js`) and
