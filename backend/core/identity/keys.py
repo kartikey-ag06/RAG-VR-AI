@@ -29,12 +29,23 @@ def _sha(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+PACK_SCOPES: dict = {}          # scopes defined by loaded packs ("<pack_id>:<action>"), added by the loader
+
+
+def allow_pack_scopes(scopes: dict) -> None:
+    PACK_SCOPES.update(scopes)
+
+
+def known_scopes() -> dict:
+    return {**CORE_SCOPES, **PACK_SCOPES}
+
+
 def check_scopes(scopes: Iterable[str]) -> list:
     out = []
     for s in scopes:
         s = str(s).strip()
-        if s not in CORE_SCOPES:
-            raise ValueError(f"unknown scope {s!r}; allowed: {sorted(CORE_SCOPES)}")
+        if s not in CORE_SCOPES and s not in PACK_SCOPES:
+            raise ValueError(f"unknown scope {s!r}; allowed: {sorted(known_scopes())}")
         if s not in out:
             out.append(s)
     if not out:

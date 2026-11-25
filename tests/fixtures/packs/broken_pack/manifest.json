@@ -1,0 +1,8 @@
+{
+  "id": "broken_pack",
+  "name": "Broken Pack",
+  "version": "0.1.0",
+  "kind": "pack",
+  "core": ">=1.1,<2.0",
+  "description": "register() raises"
+}

@@ -1,0 +1,11 @@
+{
+  "id": "orphan_pack",
+  "name": "Orphan Pack",
+  "version": "0.1.0",
+  "kind": "pack",
+  "core": ">=1.1,<2.0",
+  "depends_on": [
+    "not_installed"
+  ],
+  "description": "Needs a missing module"
+}

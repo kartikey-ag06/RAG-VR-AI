@@ -28,6 +28,7 @@ atexit.register(shutil.rmtree, _DATA, ignore_errors=True)
 os.environ["VR_RAG_DATA_DIR"] = _DATA          # documents, page images, app data -> temp folder
 os.environ["VR_RAG_NO_DB"] = "1"                 # never connect to a real database, even if database_url.txt exists
 os.environ["VR_RAG_NO_ENVFILE"] = "1"            # ignore a developer's .env (keys, tokens, limits)
+os.environ["VR_RAG_PACK_DIRS"] = str(ROOT / "tests" / "fixtures" / "packs")   # test packs (Phase 5)
 for _k in ("GROQ_API_KEY", "XAI_API_KEY", "ADMIN_TOKEN", "MCP_TOKEN", "RENDER", "DATABASE_URL", "PUBLIC_URL",
            "TURN_URLS", "TURN_SECRET"):
     os.environ.pop(_k, None)

@@ -1,0 +1,14 @@
+{
+  "id": "navigation",
+  "name": "Navigation",
+  "version": "1.0.0",
+  "kind": "capability",
+  "core": ">=1.1,<2.0",
+  "description": "Walking directions and places (OpenStreetMap)",
+  "legacy": true,
+  "legacy_routes": [
+    "/api/directions",
+    "/api/places"
+  ],
+  "requires_scopes": []
+}

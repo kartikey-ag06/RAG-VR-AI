@@ -1,0 +1,48 @@
+{
+  "id": "demo_pack",
+  "name": "Demo Pack",
+  "version": "0.1.0",
+  "kind": "pack",
+  "core": ">=1.1,<2.0",
+  "description": "Test pack that uses every part of the SDK",
+  "requires_scopes": [
+    "knowledge:read",
+    "ai:ask",
+    "events:publish"
+  ],
+  "provides_scopes": [
+    "demo_pack:approve"
+  ],
+  "subscribes": [
+    "question.asked",
+    "document.deleted"
+  ],
+  "publishes": [
+    "demo_pack.noted"
+  ],
+  "config": {
+    "greeting": {
+      "type": "string",
+      "default": "hello",
+      "description": "What /hello says"
+    },
+    "max_notes": {
+      "type": "integer",
+      "default": 5
+    }
+  },
+  "mcp_tools": [
+    {
+      "name": "demo_pack_echo",
+      "description": "Echo the text back (test tool)",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

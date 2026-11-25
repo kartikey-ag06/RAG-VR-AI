@@ -1,0 +1,23 @@
+{
+  "id": "sessions",
+  "name": "Work sessions",
+  "version": "1.0.0",
+  "kind": "capability",
+  "core": ">=1.1,<2.0",
+  "description": "Guided workflows, session audit trail, report export, pins",
+  "legacy": true,
+  "legacy_routes": [
+    "/api/sessions",
+    "/api/pins",
+    "/api/workflows",
+    "/workspace"
+  ],
+  "requires_scopes": [
+    "ai:ask",
+    "knowledge:read",
+    "connectors:use"
+  ],
+  "load_after": [
+    "connectors"
+  ]
+}

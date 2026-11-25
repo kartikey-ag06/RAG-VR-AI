@@ -13,6 +13,8 @@ Every change made here is written to the audit log.
     PUT        /api/core/tenants/{t}/packs/{p}        {enabled: true|false}
     GET/PUT    /api/core/tenants/{t}/limits           {ai_daily: n}
     GET        /api/core/audit                        ?tenant_id= &action= &limit=
+    GET        /api/core/packs/{p}                    one module: manifest facts, load state, last error (Phase 5)
+    GET        /api/core/events                       recent events, who listens to what, delivery counters
 """
 from fastapi import Body, Request
 from fastapi.responses import JSONResponse
@@ -24,7 +26,8 @@ from core.sdk.context import PolicyDenied
 LIMIT_KEYS = {"ai_daily": "limits.ai_daily"}
 
 
-def register_admin(app, identity, tenants, keys, config=None, modules=None, audit=None):
+def register_admin(app, identity, tenants, keys, config=None, modules=None, audit=None, loader=None, bus=None,
+                   emit=None):
     def guard(req):
         try:
             identity.require(req, "admin")
@@ -42,6 +45,10 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
     def log(req, action, target, tenant_id=None, **details):
         if audit is not None:
             audit.record(action, actor(req), target, tenant_id=tenant_id, details=details)
+
+    def event(name, tenant_id, **data):
+        if emit is not None:
+            emit(name, data, tenant_id)
 
     def bad(msg, status=400):
         return JSONResponse({"error": str(msg)}, status)
@@ -118,6 +125,7 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
             return bad(e)
         log(req, "config.set", rec["id"], tenant_id=t or "default", key=rec["key"], scope=rec["scope"],
             version=rec["version"])
+        event("config.changed", t or "default", key=rec["key"], scope=rec["scope"])     # never the value
         return {"config": rec}
 
     @app.delete("/api/core/config")
@@ -131,6 +139,7 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
         if not removed:
             return bad("no such value", 404)
         log(req, "config.unset", key, tenant_id=tenant_id or "default", module=module or None)
+        event("config.changed", tenant_id or "default", key=key, scope="removed")
         return {"removed": True}
 
     @app.get("/api/core/config/history")
@@ -144,7 +153,33 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
             return g
         if no_tenant(tenant_id):
             return bad(f"no tenant {tenant_id!r}", 404)
-        return {"tenant_id": tenant_id, "packs": modules.list(tenant_id)}
+        return {"tenant_id": tenant_id, "packs": all_packs(tenant_id)}
+
+    def all_packs(tenant_id):
+        """Every module: loaded ones with their manifest facts, failed ones with their error, and modules that are
+        still registered by hand (not yet moved to a manifest)."""
+        described = {d["id"]: d for d in (loader.describe(tenant_id) if loader else [])}
+        out = []
+        for m in modules.list(tenant_id):
+            out.append(dict(described.pop(m["id"], {"state": "loaded", "manual": True}), **m))
+        out += [dict(d, enabled=False) for d in described.values()]           # invalid / failed before registering
+        return sorted(out, key=lambda x: (x.get("kind") != "pack", x["id"]))
+
+    @app.get("/api/core/packs/{pack_id}")
+    def pack_one(pack_id: str, req: Request, tenant_id: str = "default"):
+        if (g := guard(req)) is not None:
+            return g
+        found = next((p for p in all_packs(tenant_id) if p["id"] == pack_id), None)
+        return found or bad(f"no module {pack_id!r}", 404)
+
+    @app.get("/api/core/events")
+    def events_recent(req: Request, tenant_id: str = "", limit: int = 50):
+        if (g := guard(req)) is not None:
+            return g
+        if bus is None:
+            return {"events": [], "subscribers": {}, "stats": {}}
+        return {"events": bus.recent(tenant_id or None, limit), "subscribers": bus.subscribers(),
+                "stats": bus.stats, "errors": bus.errors}
 
     @app.put("/api/core/tenants/{tenant_id}/packs/{pack_id}")
     def pack_toggle(tenant_id: str, pack_id: str, req: Request, body: dict = Body(...)):
@@ -158,6 +193,7 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
             return bad("enabled must be true or false")
         rec = modules.set_enabled(pack_id, tenant_id, body["enabled"], actor(req))
         log(req, "module.enable" if body["enabled"] else "module.disable", pack_id, tenant_id=tenant_id)
+        event("pack.enabled" if body["enabled"] else "pack.disabled", tenant_id, pack_id=pack_id)
         return {"pack": rec}
 
     # ------------------------------------------------------------ limits

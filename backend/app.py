@@ -50,6 +50,7 @@ from fastapi.staticfiles import StaticFiles
 
 from indexer import Store, tokenize
 from core.kernel import Container, Settings, create_app, keep_cors_outermost
+from core.sdk.context import PolicyDenied  # noqa: E402  (needed by the exception handler below)
 
 # ---------------------------------------------------------------- settings + app shell (core/kernel)
 SETTINGS = Settings.from_env(Path(__file__).resolve().parent.parent, sys.argv, os.environ)
@@ -71,6 +72,12 @@ async def lifespan(_app):
 app = create_app(SETTINGS, middleware=[(LoadGuard, {})], lifespan=lifespan)
 
 
+@app.exception_handler(PolicyDenied)
+async def _policy_denied(_req, e: PolicyDenied):
+    """The policy gate said no inside a module (ctx.require, ctx.kv, ...) -> 401 / 403 / 404 / 429 with the reason."""
+    return JSONResponse({"error": e.reason}, e.status, headers={"Retry-After": "3600"} if e.status == 429 else None)
+
+
 
 # ---------------------------------------------------------------- shared services (built once, in this order)
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
@@ -81,6 +88,10 @@ from core.identity import ApiKeys, Identity, TenantContext, Tenants
 from core.config import ConfigStore
 from core.modules import Module, ModuleGate, ModuleRegistry
 from core.observability import AuditLog
+from core.plugins import EventBus, Kernel, PackLoader
+from core.ai.prompts import PromptRegistry
+from core.sdk.events import Event
+from core.identity.keys import allow_pack_scopes
 from core.data.tenancy import current_tenant, doc_tenant
 
 
@@ -123,21 +134,22 @@ CONFIG.declare("ai.chat_model", "string", "", "Chat model for this scope; empty 
 CONFIG.declare("search.low_confidence", "number", 0.62, "Best semantic match below this = low confidence",
                min=0.0, max=1.0)
 CONFIG.declare("limits.ai_daily", "integer", 0, "AI provider calls per tenant per UTC day; 0 = no limit", min=0)
-for _m in [
-    Module("assistant", "Assistant", "capability", ("/api/assistant", "/api/calendar", "/api/notes", "/api/reminders",
-                                                   "/api/translate", "/api/weather"), "Reminders, notes, weather, translate"),
-    Module("calendar_sync", "Calendar sync", "capability", ("/api/calendar/sources",), "ICS calendar subscriptions"),
-    Module("navigation", "Navigation", "capability", ("/api/directions", "/api/places"), "Walking directions"),
-    Module("meetings", "Meetings", "capability", ("/api/meetings", "/api/teleprompter"), "Meeting notes, teleprompter"),
-    Module("expert", "Remote expert", "capability", ("/api/expert", "/expert"), "Live video help (WebRTC)"),
-    Module("sessions", "Work sessions", "capability", ("/api/sessions", "/api/pins", "/api/workflows", "/workspace"),
-           "Guided workflows, audit trail, report export, pins"),
-    Module("connectors", "Connectors", "capability", ("/api/connectors",), "Email/webhook + cloud document sync"),
-    Module("vision", "Photo questions", "capability", ("/api/vision",), "Scan, then ask"),
-    Module("industrial_field_ops", "Industrial Field Ops", "pack", ("/api/procops", "/procops", "/api/machines"),
-           "SOP question heatmap + AI redline (ProcOps), machine tags"),
-]:
-    MODULES.add(_m)
+# capabilities and packs register themselves from their manifest.json (core/plugins, Phase 5) - see the loader below.
+# Industrial Field Ops still lives in app.py/procops.py until Phase 6 moves it into packs/industrial_field_ops.
+MODULES.add(Module("industrial_field_ops", "Industrial Field Ops", "pack", ("/api/procops", "/procops", "/api/machines"),
+                   "SOP question heatmap + AI redline (ProcOps), machine tags"))
+BUS = EventBus(enabled=MODULES.enabled, log=log)          # in-process events: Core -> modules (core/plugins)
+PROMPTS = PromptRegistry(CONFIG)                          # every system prompt, by id (core/ai/prompts)
+
+
+def emit(name, data, tenant_id=None, source="core"):
+    """Publish a Core event ("question.asked", "document.deleted", ...). Never raises."""
+    try:
+        return BUS.publish(Event(name, tenant_id or current_tenant(), dict(data or {}), source=source))
+    except Exception as e:
+        log.warning("event %s not published: %s", name, e)
+
+
 # order matters: the LAST middleware added runs FIRST. TenantContext must set the tenant before ModuleGate checks it.
 app.add_middleware(ModuleGate, registry=MODULES)        # 404 for modules switched off for this tenant (Phase 4)
 app.add_middleware(TenantContext, identity=IDENTITY)   # sets the request's tenant for the data layer (Phase 4)
@@ -217,6 +229,7 @@ async def files_upload(req: Request, files: list[UploadFile] = File(...)):
             errors.append(str(e))
     for a in added:
         AUDIT.record("document.upload", _actor(req), a.get("uid", ""), details={"name": a.get("name")})
+        emit("document.added", {"doc_uid": a.get("uid", ""), "name": a.get("name")})
     return JSONResponse({"added": added, "errors": errors}, status_code=200 if added or not errors else 400)
 
 
@@ -228,6 +241,7 @@ def files_delete(uid: str, req: Request):
     if not e or not STORE.delete(uid):
         return JSONResponse({"error": "not found"}, 404)
     AUDIT.record("document.delete", _actor(req), uid, details={"name": e.get("name")})
+    emit("document.deleted", {"doc_uid": uid})
     return {"deleted": uid}
 
 
@@ -242,6 +256,7 @@ def files_patch(uid: str, req: Request, _body=JSONB):
                           tags=clean(b.get("tags"), 30), groups=clean(b.get("groups"), 20)) if _own_doc(uid) else None
     if e:
         AUDIT.record("document.update", _actor(req), uid, details={k: b[k] for k in ("title", "tags", "groups") if k in b})
+        emit("document.updated", {"doc_uid": uid, "fields": [k for k in ("title", "tags", "groups") if k in b]})
     return e or JSONResponse({"error": "not found"}, 404)
 
 
@@ -353,7 +368,7 @@ def rag_page(name: str, req: Request):
 
 # ---------------------------------------------------------------- LLM provider (Groq / Grok) -> core/ai
 from core.ai import AIGateway, SseReader, clean_messages
-from core.sdk.context import BudgetExceeded
+from core.sdk.context import BudgetExceeded, PolicyDenied
 
 KEY_FILE = ROOT / "grok_api_key.txt"
 MODEL_FILE = ROOT / "grok_model.txt"
@@ -535,14 +550,20 @@ def _register(name, fn):
         print(f"[{name}] disabled: {_e}", flush=True)
 
 
-import assistant, connectors, workflows, expert, mcp_server, calsync, navigation, meetings
-CALS = _register("calendar sync", lambda: calsync.register(app, KV, AUTH))
-_register("assistant", lambda: assistant.register(app, KV, llm_complete, CALS, AUTH))
-CONNECTORS = _register("connectors", lambda: connectors.register(app, KV, AUTH, STORE)) or {"send": None, "get": lambda c: None}
-_register("workflows", lambda: workflows.register(app, KV, llm_complete, run_search, STORE, CONNECTORS, ROOT, AUTH))
-_register("expert", lambda: expert.register(app, ROOT, AUTH))
-_register("navigation", lambda: navigation.register(app))
-_register("meetings", lambda: meetings.register(app, KV, llm_complete, run_search, AUTH))
+import mcp_server
+
+# ---------------------------------------------------------------- capabilities + packs (Phase 5): manifest + register(ctx)
+KERNEL = Kernel(identity=IDENTITY, modules=MODULES, config=CONFIG, prompts=PROMPTS, ai=AI, bus=BUS, kv=KV,
+                search=lambda q, k, tag, user: SEARCH.search(q, k, tag=tag, user=user),
+                page_url=lambda uid, page: f"/api/v1/documents/{uid}/pages/{page}.jpg")
+_PACK_DIRS = [BACKEND_DIR / "capabilities", BACKEND_DIR / "packs"] + \
+    [Path(p) for p in os.environ.get("VR_RAG_PACK_DIRS", "").split(os.pathsep) if p.strip()]
+LOADER = PackLoader(app, KERNEL, _PACK_DIRS, allow_scopes=allow_pack_scopes, legacy_services={
+    # old-style dependencies for capabilities not yet moved to the SDK (manifest "legacy": true) - ADR 0006
+    "app": app, "kv": KV, "auth": AUTH, "store": STORE, "root": ROOT, "llm_complete": llm_complete,
+    "run_search": run_search, "provider": provider, "get_key": get_key, "list_models": list_models,
+    "spend": AI.spend})
+LOADER.load_all()
 
 
 def _actor(req):
@@ -596,22 +617,21 @@ def admin_user_delete(uid: str, req: Request):
     return {"deleted": uid}
 
 
-VISION = None
-try:
-    import vision
-    VISION = vision.register(app, provider, get_key, list_models, ROOT, AUTH, spend=AI.spend)   # "scan, then ask" (photo questions)
-except Exception as _e:
-    print(f"[vision] disabled: {_e}", flush=True)
+VISION = LOADER.exports.get("vision")       # photo pipeline, shared with /api/v1/scan
 
 
 # ---------------------------------------------------------------- one API for every glasses client ("many doors")
 import api_v1
 CORE = _register("api v1", lambda: api_v1.register(app, STORE, run_search, llm_complete, llm_stream, AUTH, provider, VISION,
-                                                   identity=IDENTITY, config=CONFIG))
-_register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE, identity=IDENTITY))
+                                                   identity=IDENTITY, config=CONFIG, prompts=PROMPTS, events=emit))
+if CORE:
+    KERNEL.answer = lambda q, tag, style, lang, user, door: CORE["answer"](q, tag, style, lang, user, door=door)
+_register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE, identity=IDENTITY,
+                                                   kernel=KERNEL))
 from core.admin import register_admin
 _register("control plane", lambda: register_admin(app, IDENTITY, SERVICES.get("tenants"), SERVICES.get("keys"),
-                                                    config=CONFIG, modules=MODULES, audit=AUDIT))
+                                                    config=CONFIG, modules=MODULES, audit=AUDIT, loader=LOADER,
+                                                    bus=BUS, emit=emit))
 
 
 @app.post("/api/server/stop")

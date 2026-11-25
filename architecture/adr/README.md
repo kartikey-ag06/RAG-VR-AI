@@ -12,8 +12,9 @@ Rules
 | --- | --- | --- |
 | [0001](0001-modular-monolith-with-plugin-packs.md) | Modular monolith with plugin packs | Proposed |
 | [0002](0002-multi-tenancy.md) | One deployment serving many customers (multi-tenancy) | Accepted |
-| [0003](0003-pack-contract-core-sdk.md) | Pack contract: `core.sdk`, `CoreContext`, manifest | Proposed |
+| [0003](0003-pack-contract-core-sdk.md) | Pack contract: `core.sdk`, `CoreContext`, manifest | Accepted |
 | [0004](0004-ai-governance.md) | All AI calls go through the Core AI gateway | Proposed |
 | [0005](0005-control-plane.md) | Control plane: settings, modules on/off, limits, audit | Accepted |
+| [0006](0006-integration-framework.md) | Integration framework: manifests, register(ctx), event bus | Accepted |
 
 Full plan: "VR_RAG – Centralized Core Engine Architecture Plan" (claude.ai doc, 24 Nov 2026).

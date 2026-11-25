@@ -1,0 +1,13 @@
+{
+  "id": "calendar_sync",
+  "name": "Calendar sync",
+  "version": "1.0.0",
+  "kind": "capability",
+  "core": ">=1.1,<2.0",
+  "description": "ICS calendar subscriptions (Outlook, Google) feeding the assistant",
+  "legacy": true,
+  "legacy_routes": [
+    "/api/calendar/sources"
+  ],
+  "requires_scopes": []
+}
