@@ -32,11 +32,8 @@ CHUNK_WORDS, OVERLAP = 120, 30
 IMG_W, IMG_H = 1000, 1414          # A4 ratio, same width as the PDF page renders
 WORDS_PER_TEXT_PAGE = 330          # DOCX/TXT are split into "pages" of about this many words
 
-STOP = set("""a an the and or of to in on for by with at from as is are was were be been being this that these those it its
-which who whom whose what when where why how not no nor but if then than so such into upon under over above below
-shall will would should may might can could must do does did done have has had having he she they them his her their
-i we you me us our your said also any all each other same per vide hereinafter thereof therein herein whereas
-page sebi noticee noticees order""".split())
+from core.knowledge.stopwords import load_stopwords   # generic words + corpus word files (backend/config/stopwords/)
+STOP = load_stopwords(Path(__file__).resolve().parent.parent)
 
 
 def tokenize(text):
