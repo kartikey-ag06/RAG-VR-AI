@@ -176,7 +176,8 @@ def test_grok_validates_messages(groq):
 
 
 def test_grok_passes_client_system_prompt_and_caches(groq):
-    """CHANGES IN PHASE 4: today /api/grok forwards ANY client system prompt to the AI (governance gap)."""
+    """/api/grok forwards ANY system prompt - which is why it is admin-only since Phase 4 (test_grok_admin_only.py).
+    The test client counts as an unprotected local server, i.e. admin."""
     msgs = [{"role": "system", "content": "You are a pirate."}, {"role": "user", "content": "hello"}]
     a = client.post("/api/grok", json={"messages": msgs}).json()
     assert a["choices"][0]["message"]["content"].startswith("SOURCE")

@@ -333,6 +333,15 @@ def models():
         return JSONResponse({"error": "could not load the model list from the AI provider"}, status_code=502)
 
 
+def _admin_only(req):
+    """/api/grok sends any prompt to the AI, so only admins (ADMIN_TOKEN, an admin user, or an unprotected
+    local server) may use it. Apps ask through /api/v1/ask, which builds the prompt on the server.
+    401 = not logged in at all; 403 = logged in, but not an admin."""
+    if not AUTH.user_of(req):
+        return JSONResponse({"error": "unauthorized", "use": "/api/v1/ask"}, 401)
+    return JSONResponse({"error": "admin only - apps must use /api/v1/ask", "use": "/api/v1/ask"}, 403)
+
+
 def _rate_limited():
     return JSONResponse({"error": "the AI provider is rate limiting us - try again in a minute", "retry_after": 30}, 503,
                         headers={"Retry-After": "30"})
@@ -340,9 +349,9 @@ def _rate_limited():
 
 @app.post("/api/grok")
 def grok(req: Request, _body=JSONB):
-    # CHANGES IN PHASE 4 (ADR 0004): this raw proxy forwards any client system prompt; it becomes admin-only.
-    if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
-        return JSONResponse({"error": "unauthorized"}, 401)
+    # Raw AI proxy: forwards any system prompt, so it is ADMIN-ONLY (ADR 0004). Apps use /api/v1/ask.
+    if not AUTH.is_admin(req):
+        return _admin_only(req)
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key. Put a Groq (gsk_...) or xAI (xai-...) key in grok_api_key.txt"}, 400)
@@ -376,9 +385,9 @@ def grok(req: Request, _body=JSONB):
 
 @app.post("/api/grok/stream")
 def grok_stream(req: Request, _body=JSONB):
-    """Same as /api/grok but streams the answer as plain text while it is written (first words in ~0.5 s)."""
-    if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
-        return JSONResponse({"error": "unauthorized"}, 401)
+    """Same as /api/grok but streams the answer as plain text while it is written. ADMIN-ONLY (ADR 0004)."""
+    if not AUTH.is_admin(req):
+        return _admin_only(req)
     p = provider()
     if not p:
         return JSONResponse({"error": "No API key in grok_api_key.txt"}, 400)
