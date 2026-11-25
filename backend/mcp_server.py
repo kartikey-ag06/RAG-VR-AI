@@ -75,17 +75,21 @@ def register(app, store, search, llm, auth, core=None, identity=None):
                         "score": round(h["score"], 4), "semantic": None if h.get("sem") is None else round(h["sem"], 3)})
         return out, res
 
+    def shown(e):
+        """MCP callers see public documents of the CURRENT TENANT only (no groups, same tenant - Phase 4)."""
+        return bool(e) and not e.get("groups") and auth.can_see_doc(e, None)
+
     def call_tool(name, a, base=""):
         if name == "list_documents":
             docs = [{"doc_uid": d["uid"], "title": d["title"], "pages": d["pages"], "type": d["type"], "machine_ids": d.get("tags", [])}
-                    for d in store.snapshot["index"]["docs"] if not d.get("groups")]
+                    for d in store.snapshot["index"]["docs"] if shown(d)]
             return json.dumps(docs, ensure_ascii=False, indent=1)
         if name == "search_documents":
             ps, res = passages(a.get("query", ""), a.get("k", 6), a.get("machine_id"))
             return json.dumps({"mode": res.get("mode"), "confidence": res.get("conf"), "passages": ps}, ensure_ascii=False, indent=1)
         if name == "get_page":
             e = store.doc_entry(str(a.get("doc_uid", "")))
-            if not e or e.get("groups"):
+            if not shown(e):
                 raise ValueError("document not found")
             t = store.page_text(e["uid"], int(a.get("page", 1)))
             if t is None:
@@ -94,7 +98,7 @@ def register(app, store, search, llm, auth, core=None, identity=None):
         if name == "get_page_image":
             uid, page = str(a.get("doc_uid", "")), int(a.get("page", 1))
             e = store.doc_entry(uid)
-            if not e or e.get("groups"):
+            if not shown(e):
                 raise ValueError("document not found")
             p = store.page_image_uid(uid, page)
             if not p:

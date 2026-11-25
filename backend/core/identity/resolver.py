@@ -5,8 +5,8 @@ One place for every kind of login, so endpoints check SCOPES instead of each re-
   caller sends                                  -> principal                         scopes
   Authorization: Bearer vrk_<id>.<secret>       -> kind "service", the key's tenant  the key's scopes
   Authorization: Bearer <MCP_TOKEN>             -> kind "service", default tenant    SERVICE_SCOPES
-  X-VR-Token: <ADMIN_TOKEN> / an admin user     -> kind "user", default tenant       {"admin"} (= everything)
-  X-VR-Token: <user token>                      -> kind "user", default tenant       USER_SCOPES
+  X-VR-Token: <ADMIN_TOKEN> / an admin user     -> kind "user", the user's tenant   {"admin"} (= everything)
+  X-VR-Token: <user token>                      -> kind "user", the user's tenant   USER_SCOPES
   nothing, on an unprotected local server       -> kind "anonymous"                  {"admin"} (local development)
   nothing, on a protected server                -> kind "anonymous"                  {"knowledge:read"} (public docs)
 
@@ -53,11 +53,13 @@ class Identity:
         user = self.auth.user_of(req)
         if self.auth.is_admin(req):
             kind = "user" if (user or token) else "anonymous"
-            return Principal(tenant_id=DEFAULT_TENANT, kind=kind, id=(user or {}).get("id", "admin"),
+            return Principal(tenant_id=(user or {}).get("tenant_id") or DEFAULT_TENANT, kind=kind,
+                             id=(user or {}).get("id", "admin"),
                              name=(user or {}).get("name", "admin"), groups=tuple((user or {}).get("groups", [])),
                              scopes=frozenset({"admin"})), user
         if user:
-            return Principal(tenant_id=DEFAULT_TENANT, kind="user", id=user["id"], name=user.get("name", ""),
+            return Principal(tenant_id=user.get("tenant_id") or DEFAULT_TENANT, kind="user", id=user["id"],
+                             name=user.get("name", ""),
                              groups=tuple(user.get("groups", [])), scopes=USER_SCOPES), user
         scopes = USER_SCOPES if not self.auth.admin_required(req) else frozenset({"knowledge:read"})
         return Principal(tenant_id=DEFAULT_TENANT, kind="anonymous", scopes=scopes), None

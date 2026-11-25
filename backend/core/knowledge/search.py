@@ -9,7 +9,7 @@ generic TAG filter here; app.py maps it back to the old response fields.
 Dependencies are passed in (ADR 0001 - core/ imports no old backend modules):
     store       has .snapshot (the current index), .model_name, .embedder, .request_rebuild()
     tokenize    text -> list of index terms (the same function the index was built with)
-    can_see     (doc_groups, user) -> bool  (document permissions)
+    can_see     (doc_entry, user) -> bool  (document permissions: tenant + groups)
     db          optional, has .semantic(query_vector, model, limit, uids) -> [(uid, ordinal, score)]  (pgvector)
 """
 import math
@@ -102,7 +102,7 @@ class SearchEngine:
 
     # ------------------------------------------------------------ search
     def visible_positions(self, snap, user) -> list:
-        return [d["id"] for d in snap["index"]["docs"] if self.can_see(d.get("groups", []), user)]
+        return [d["id"] for d in snap["index"]["docs"] if self.can_see(d, user)]
 
     def search(self, query: str, k: int = 8, tag: str = "", user=None) -> dict:
         """Hybrid search. Respects document permissions; `tag` narrows to tagged documents when any match.

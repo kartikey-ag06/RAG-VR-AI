@@ -32,6 +32,7 @@ CHUNK_WORDS, OVERLAP = 120, 30
 IMG_W, IMG_H = 1000, 1414          # A4 ratio, same width as the PDF page renders
 WORDS_PER_TEXT_PAGE = 330          # DOCX/TXT are split into "pages" of about this many words
 
+from core.data.tenancy import DEFAULT_TENANT, current_tenant, doc_tenant
 from core.knowledge.stopwords import load_stopwords   # generic words + corpus word files (backend/config/stopwords/)
 STOP = load_stopwords(Path(__file__).resolve().parent.parent)
 
@@ -270,7 +271,8 @@ class Store:
         with self.lock:
             return [dict(e) for e in self.manifest]
 
-    def add(self, filename, data, tags=None, groups=None):
+    def add(self, filename, data, tags=None, groups=None, tenant_id=None):
+        """tenant_id: the owner (default: the tenant of the current request, see core/data/tenancy.py)."""
         ext = Path(filename).suffix.lower()
         if ext not in ALLOWED:
             raise ValueError(f"{filename}: only PDF, DOCX and TXT files are allowed")
@@ -279,11 +281,12 @@ class Store:
         if not data:
             raise ValueError(f"{filename}: empty file")
         digest = hashlib.sha256(data).hexdigest()
-        with self.lock:
-            dup = next((e for e in self.manifest if e.get("sha256") == digest), None)
+        tenant_id = tenant_id or current_tenant()
+        with self.lock:      # duplicates only WITHIN a tenant: never tell one customer about another's files
+            dup = next((e for e in self.manifest if e.get("sha256") == digest and doc_tenant(e) == tenant_id), None)
         if dup:
             raise ValueError(f"{filename}: already uploaded as \"{dup['name']}\"")
-        return self._add(filename, data, tags=tags, groups=groups)
+        return self._add(filename, data, tags=tags, groups=groups, tenant_id=tenant_id)
 
     def delete(self, uid):
         with self.lock:
@@ -458,7 +461,7 @@ class Store:
         self.wake.set()
 
     # ---------- internals
-    def _add(self, filename, data, seeded=False, tags=None, groups=None):
+    def _add(self, filename, data, seeded=False, tags=None, groups=None, tenant_id=DEFAULT_TENANT):
         uid = uuid.uuid4().hex[:12]
         ext = Path(filename).suffix.lower()
         name = safe_name(filename)
@@ -466,7 +469,7 @@ class Store:
         entry = {"uid": uid, "name": name, "ext": ext, "type": ext[1:].upper(), "size": len(data),
                  "title": pretty_title(name), "pages": 0, "status": "processing", "error": "",
                  "uploaded": datetime.now(timezone.utc).isoformat(timespec="seconds"), "seed": seeded,
-                 "sha256": hashlib.sha256(data).hexdigest()}
+                 "sha256": hashlib.sha256(data).hexdigest(), "tenant_id": tenant_id}
         entry.update(tags=list(tags or []), groups=list(groups or []))     # set before indexing: never briefly public
         with self.lock:
             self.manifest.append(entry)
@@ -572,7 +575,8 @@ class Store:
                                                              "caption": fg["caption"], "w": fg["w"], "h": fg["h"]})
             index_docs.append({"id": pos, "file": e["name"], "title": e["title"], "pages": len(texts),
                                "type": e["type"], "uid": e["uid"], "rev": rev.get("version", "1.0"),
-                               "tags": e.get("tags", []), "groups": e.get("groups", []), "figs": figs})
+                               "tags": e.get("tags", []), "groups": e.get("groups", []), "figs": figs,
+                               "tenant_id": doc_tenant(e)})
             for pno, t in enumerate(texts, start=1):
                 for c in chunk_page(t):
                     chunks.append({"doc": pos, "page": pno, "text": c})

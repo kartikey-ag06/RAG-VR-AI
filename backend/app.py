@@ -72,7 +72,8 @@ def on_startup():
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
 from core.data import DB, LocalKV, database_url
 from auth import Auth
-from core.identity import ApiKeys, Identity, Tenants
+from core.identity import ApiKeys, Identity, TenantContext, Tenants
+from core.data.tenancy import current_tenant, doc_tenant
 
 
 def _make_db(c):
@@ -104,11 +105,12 @@ KV = SERVICES.get("kv")
 AUTH = SERVICES.get("auth")
 IDENTITY = SERVICES.get("identity")       # who is calling: tenant + scopes (core/identity, Phase 4)
 SERVICES.get("tenants").ensure_default()
+app.add_middleware(TenantContext, identity=IDENTITY)   # sets the request's tenant for the data layer (Phase 4)
 # ---------------------------------------------------------------- search -> core/knowledge
 from core.knowledge import LOW_CONFIDENCE, SearchEngine, norm_code
 from core.knowledge.search import RRF_K, W_KEYWORD, W_SEMANTIC  # noqa: F401  (old names, still importable)
 
-SEARCH = SearchEngine(STORE, tokenize=tokenize, can_see=AUTH.can_see, embed_model=EMBED_MODEL, db=DBX)
+SEARCH = SearchEngine(STORE, tokenize=tokenize, can_see=AUTH.can_see_doc, embed_model=EMBED_MODEL, db=DBX)
 EMB = SEARCH.emb                       # same dict: status pages read EMB["state"]
 load_embeddings = SEARCH.load_embeddings
 
@@ -157,7 +159,7 @@ def upload_page():
 @app.get("/api/files")
 def files_list(req: Request):
     snap, user = STORE.snapshot, AUTH.user_of(req)
-    return {"files": [e for e in STORE.list() if AUTH.can_see(e.get("groups", []), user)], "version": snap["version"], "state": STORE.state,
+    return {"files": [e for e in STORE.list() if AUTH.can_see_doc(e, user)], "version": snap["version"], "state": STORE.state,
             "chunks": len(snap["index"]["chunks"]), "embeddings": EMB["state"]}
 
 
@@ -172,7 +174,8 @@ async def files_upload(req: Request, files: list[UploadFile] = File(...)):
     for f in files:
         try:
             data = await f.read()
-            added.append(await run_in_threadpool(STORE.add, f.filename or "file", data, tags=tags, groups=groups))
+            added.append(await run_in_threadpool(STORE.add, f.filename or "file", data, tags=tags, groups=groups,
+                                                 tenant_id=current_tenant()))
         except ValueError as e:
             errors.append(str(e))
     return JSONResponse({"added": added, "errors": errors}, status_code=200 if added or not errors else 400)
@@ -205,7 +208,7 @@ def machines(req: Request):
     snap, user = STORE.snapshot, AUTH.user_of(req)
     out = {}
     for d in snap["index"]["docs"]:
-        if AUTH.can_see(d.get("groups", []), user):
+        if AUTH.can_see_doc(d, user):
             for t in d.get("tags", []):
                 out.setdefault(t, []).append({"uid": d["uid"], "title": d["title"], "id": d["id"]})
     return {"machines": [{"machine_id": k, "docs": v} for k, v in sorted(out.items())]}
@@ -217,7 +220,7 @@ def machines_resolve(req: Request, _body=JSONB):
     b = (_body if _body is not None else {})
     text = str(b.get("text", ""))[:2000]
     snap, user = STORE.snapshot, AUTH.user_of(req)
-    tags = {t for d in snap["index"]["docs"] if AUTH.can_see(d.get("groups", []), user) for t in d.get("tags", [])}
+    tags = {t for d in snap["index"]["docs"] if AUTH.can_see_doc(d, user) for t in d.get("tags", [])}
     nt = norm_code(text)
     words = {norm_code(w) for w in re.split(r"[\s,;:/|]+", text) if len(norm_code(w)) >= 3}
     best = None
@@ -227,7 +230,7 @@ def machines_resolve(req: Request, _body=JSONB):
             best = t
             break
     docs = [{"uid": d["uid"], "title": d["title"], "id": d["id"]} for d in snap["index"]["docs"]
-            if best in d.get("tags", []) and AUTH.can_see(d.get("groups", []), user)] if best else []
+            if best in d.get("tags", []) and AUTH.can_see_doc(d, user)] if best else []
     return {"machine_id": best, "docs": docs, "text": text[:200]}
 
 
@@ -247,21 +250,27 @@ def rag_index(req: Request):
     """The search index the glasses load (about 1.5 MB). Built once per (version, visible docs), kept gzip-compressed
     (about 0.4 MB on the wire), and answered with 304 Not Modified when the glasses already have this version."""
     snap = STORE.snapshot
-    if AUTH.enabled:
-        ok = set(visible_positions(snap, AUTH.user_of(req)))
-        key = (snap["version"], tuple(sorted(ok)))
-    else:
-        ok, key = None, (snap["version"], "all")
+    ok = set(visible_positions(snap, AUTH.user_of(req)))       # tenant + groups (Phase 4): always filtered
+    everything = len(ok) == len(snap["index"]["docs"])
+    key = (snap["version"], current_tenant(), "all" if everything else tuple(sorted(ok)))
     entry = _ix_cache.get(key)
     if entry is None:
-        ix = snap["index"]
-        if ok is not None:          # same doc positions for everyone; hidden docs are emptied, not removed
-            ix = dict(ix)
-            ix["docs"] = [d if d["id"] in ok else {"id": d["id"], "title": "(restricted)", "file": "", "pages": 0,
-                                                    "type": "", "uid": "", "tags": [], "figs": {}} for d in snap["index"]["docs"]]
-            # same length as the server's list: search results are chunk positions, so hidden chunks are blanked
-            ix["chunks"] = [c if c["doc"] in ok else {"doc": c["doc"], "page": 0, "text": "", "terms": [], "weights": []}
-                            for c in snap["index"]["chunks"]]
+        src = snap["index"]
+        ix = dict(src)
+        docs, chunks = src["docs"], src["chunks"]
+        if not everything:          # same positions for everyone; hidden docs/chunks are emptied, not removed
+            docs = [d if d["id"] in ok else {"id": d["id"], "title": "(restricted)", "file": "", "pages": 0,
+                                             "type": "", "uid": "", "tags": [], "figs": {}} for d in docs]
+            # search results are chunk positions, so the list keeps its length; hidden chunks are blanked
+            chunks = [c if c["doc"] in ok else {"doc": c["doc"], "page": 0, "text": "", "terms": [], "weights": []}
+                      for c in chunks]
+            # the vocabulary lists every word of every document: words used ONLY by hidden documents are blanked
+            # too (positions kept - chunks point at words by position), or another tenant's words would leak
+            used = {t for c in chunks for t in c["terms"]}
+            ix["vocab"] = [w if i in used else "" for i, w in enumerate(src["vocab"])]
+            ix["idf"] = [v if i in used else 0 for i, v in enumerate(src["idf"])]
+        ix["docs"] = [{k: v for k, v in d.items() if k != "tenant_id"} for d in docs]   # internal field
+        ix["chunks"] = chunks
         raw = json.dumps(ix, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         entry = {"raw": raw, "gz": gzip.compress(raw, 6), "etag": '"' + hashlib.sha1(raw).hexdigest()[:20] + '"'}
         with _ix_lock:
@@ -278,7 +287,7 @@ def rag_index(req: Request):
 
 def _doc_visible(pos, req):
     docs = STORE.snapshot["index"]["docs"]
-    return 0 <= pos < len(docs) and AUTH.can_see(docs[pos].get("groups", []), AUTH.user_of(req))
+    return 0 <= pos < len(docs) and AUTH.can_see_doc(docs[pos], AUTH.user_of(req))
 
 
 @app.get("/rag/figures/{pos}/{file}")
@@ -321,7 +330,8 @@ def status():
     return {"configured": bool(p), "provider": p["name"] if p else "", "model": chat_model() if p else "",
             "stt": bool(p and p["name"] == "groq"),
             "search": "hybrid" if EMB["state"] == "ready" else ("keyword (embeddings " + EMB["state"] + ")"),
-            "docs": len(STORE.snapshot["index"]["docs"]), "indexVersion": STORE.snapshot["version"],
+            "docs": sum(1 for d in STORE.snapshot["index"]["docs"] if doc_tenant(d) == current_tenant()),  # this tenant only
+            "indexVersion": STORE.snapshot["version"],
             "embedModel": EMBED_MODEL, "backend": "python", "storage": "postgres+pgvector" if DBX else "local files",
             "rbac": AUTH.enabled, "features": ["captions", "translate", "liveai", "reminders", "weather", "workflows",
                                                "pins", "exports", "expert", "mcp", "machines", "figures", "teleprompter", "meetings",
