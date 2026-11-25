@@ -45,6 +45,7 @@ from net import JSONB
 API = "/api/v1"
 STYLES = ("full", "glance", "spoken")
 MAX_Q = 1000
+MAX_PASSAGES = 8
 
 SMART_SYSTEM = (
     "You are the assistant inside smart glasses / a VR app. You receive numbered excerpts from the user's documents, "
@@ -175,11 +176,13 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         user = seen + (excerpts(hits) if hits else "Excerpts: (none matched)\n\n") + "Question: " + question
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    def result(raw, hits, res, extra=None):
+    def result(raw, hits, res, extra=None, positions=None):
         body, mode, cited = parse_answer(raw, hits)
         out = {"answer": body, "mode": mode,
                "citations": [citation(hits[i], n + 1) for n, i in enumerate(cited)],
                "confidence": res.get("conf"), "search_mode": res.get("mode")}
+        if positions is not None:            # client sent its passages: cited = positions in the CLIENT's list
+            out["cited"] = [positions[i] for i in cited]
         if extra:
             out.update(extra)
         return out
@@ -191,23 +194,72 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         return {"answer": extractive(hits), "mode": "offline", "citations": [citation(h, i + 1) for i, h in enumerate(hits[:3])],
                 "confidence": res.get("conf"), "search_mode": res.get("mode"), "note": note}
 
-    def answer(question, machine, style, lang, user, photo=None, k=6):
-        """The one RAG pipeline every door uses: search -> Groq -> parsed answer with citations."""
-        query = question if not photo else " ".join(
-            x for x in (question, photo.get("object", ""), photo.get("text_seen", ""), photo.get("keywords", "")) if x)
-        res = find(query, k, machine, user)
-        hits = res["hits"][:k]
+    def answer(question, machine, style, lang, user, photo=None, k=6, given=None):
+        """The one RAG pipeline every door uses: search -> Groq -> parsed answer with citations.
+        `given` = (hits, positions) from passages_of(): the client already searched, skip the search."""
+        positions = None
+        if given is not None:
+            hits, positions = given
+            res = {"mode": "client", "conf": None}
+        else:
+            query = question if not photo else " ".join(
+                x for x in (question, photo.get("object", ""), photo.get("text_seen", ""), photo.get("keywords", "")) if x)
+            res = find(query, k, machine, user)
+            hits = res["hits"][:k]
         if not provider():
             return offline(hits, res, "no AI key on the server")
         try:
             raw = llm_complete(messages(question, hits, style, lang, photo), 900)
         except Exception as e:
             return offline(hits, res, f"AI error: {e}")
-        return result(raw, hits, res)
+        return result(raw, hits, res, positions=positions)
 
     def question_of(b, key="question"):
         q = str(b.get(key) or b.get("query") or "").strip()[:MAX_Q]
         return q
+
+    def photo_of(b):
+        """Optional photo description the client already got from /api/vision/describe (one vision call per photo)."""
+        p = b.get("photo")
+        if not isinstance(p, dict):
+            return None
+        out = {k: str(p.get(k) or "")[:500] for k in ("object", "details", "text_seen", "keywords")}
+        return out if any(out.values()) else None
+
+    def passages_of(b, user):
+        """Optional passages the client already found (its own search). Only REFERENCES are accepted -
+        chunk position i, doc_uid, page - never text: the server reads the text from its own index and checks the
+        caller may see the document, so a client cannot inject excerpts or prompts. Returns (hits, positions):
+        positions[j] = index of hits[j] in the client's list, so citations can point back at the client's hits.
+        None = the field was not sent (normal search)."""
+        refs = b.get("passages")
+        if not isinstance(refs, list):
+            return None
+        snap = store.snapshot
+        chunks, docs = snap["index"]["chunks"], snap["index"]["docs"]
+        hits, positions = [], []
+        for pos, ref in enumerate(refs[:MAX_PASSAGES]):
+            if not isinstance(ref, dict):
+                continue
+            uid, page = str(ref.get("doc_uid") or ""), ref.get("page")
+            try:
+                i = int(ref.get("i", -1))
+                page = int(page)
+            except (TypeError, ValueError):
+                continue
+            ok = 0 <= i < len(chunks) and docs[chunks[i]["doc"]]["uid"] == uid and chunks[i]["page"] == page
+            if not ok:                       # client index slightly out of date: first chunk of that page instead
+                i = next((j for j, c in enumerate(chunks) if c["page"] == page and docs[c["doc"]]["uid"] == uid), -1)
+            if i < 0:
+                continue
+            c = chunks[i]
+            d = docs[c["doc"]]
+            if not auth.can_see(d.get("groups", []), user):
+                continue
+            hits.append({"i": i, "score": 0.0, "kw": None, "sem": None, "doc": c["doc"], "page": c["page"],
+                         "uid": d["uid"], "title": d["title"], "text": c["text"]})
+            positions.append(pos)
+        return hits, positions
 
     # ------------------------------------------------------------ endpoints
     @app.get(f"{API}/health")
@@ -261,7 +313,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         if not q:
             return JSONResponse({"error": "question is required"}, 400)
         style, lang = opts(b)
-        return answer(q, b.get("machine_id"), style, lang, user)
+        return answer(q, b.get("machine_id"), style, lang, user, photo=photo_of(b), given=passages_of(b, user))
 
     @app.post(f"{API}/ask/stream")
     def v1_ask_stream(req: Request, _body=JSONB):
@@ -273,8 +325,14 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         if not q:
             return JSONResponse({"error": "question is required"}, 400)
         style, lang = opts(b)
-        res = find(q, 6, b.get("machine_id"), user)
-        hits = res["hits"][:6]
+        photo, given = photo_of(b), passages_of(b, user)
+        positions = None
+        if given is not None:
+            (hits, positions), res = given, {"mode": "client", "conf": None}
+        else:
+            query = q if not photo else " ".join(x for x in (q, photo["object"], photo["text_seen"], photo["keywords"]) if x)
+            res = find(query, 6, b.get("machine_id"), user)
+            hits = res["hits"][:6]
 
         def sse(event, data):
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -287,13 +345,13 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                 return
             raw = []
             try:
-                for piece in llm_stream(messages(q, hits, style, lang), 900):
+                for piece in llm_stream(messages(q, hits, style, lang, photo), 900):
                     raw.append(piece)
                     yield sse("delta", {"text": piece, "answer_so_far": clean_body("".join(raw))})
             except Exception as e:
                 yield sse("done", offline(hits, res, f"AI error: {e}"))
                 return
-            yield sse("done", result("".join(raw), hits, res))
+            yield sse("done", result("".join(raw), hits, res, positions=positions))
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
