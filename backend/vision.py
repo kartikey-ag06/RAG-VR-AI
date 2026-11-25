@@ -33,7 +33,7 @@ DESCRIBE_PROMPT = (
 )
 
 
-def register(app, provider, get_key, list_models, root, auth=None):
+def register(app, provider, get_key, list_models, root, auth=None, spend=None):
     cache = {"model": None, "t": 0}
     override = root / "vision_model.txt"
 
@@ -66,6 +66,8 @@ def register(app, provider, get_key, list_models, root, auth=None):
             {"role": "user", "content": [{"type": "text", "text": user},
                                          {"type": "image_url", "image_url": {"url": image}}]}]
         body = {"model": model, "messages": msgs, "temperature": 0.2, "max_tokens": max_tokens}
+        if spend:
+            spend()                                  # counts against the tenant's daily AI limit (Phase 4)
         for attempt in (1, 2):
             r = HTTP.post(f"{p['base']}/chat/completions", headers={"Authorization": f"Bearer {get_key()}"},
                               json=body, timeout=90)
@@ -122,7 +124,7 @@ def register(app, provider, get_key, list_models, root, auth=None):
         try:
             return describe(b["image"], b.get("hint", ""))
         except Exception as e:
-            return JSONResponse({"error": str(e)}, 502)
+            return JSONResponse({"error": getattr(e, "reason", str(e))}, 429 if getattr(e, "status", 0) == 429 else 502)
 
     def _parse_description(out, model):
         txt = re.sub(r"^```(?:json)?|```$", "", out.strip(), flags=re.M).strip()
@@ -149,7 +151,7 @@ def register(app, provider, get_key, list_models, root, auth=None):
         try:
             out, model = call(b["image"], str(b.get("system", ""))[:4000], str(b.get("user", ""))[:16000])
         except Exception as e:
-            return JSONResponse({"error": str(e)}, 502)
+            return JSONResponse({"error": getattr(e, "reason", str(e))}, 429 if getattr(e, "status", 0) == 429 else 502)
         return {"text": out, "model": model}
 
     # used by /api/v1 (api_v1.py) so every glasses client shares the same photo pipeline

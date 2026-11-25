@@ -24,6 +24,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Optional, Union
 
+from core.data.tenancy import current_tenant
+from core.sdk.context import BudgetExceeded
+
 PathLike = Union[Path, Callable[[], Path]]
 
 GROQ = {"name": "groq", "base": "https://api.groq.com/openai/v1"}
@@ -85,8 +88,11 @@ class SseReader:
 
 class AIGateway:
     def __init__(self, http, env: Mapping[str, str], key_file: PathLike, model_file: PathLike,
-                 log: Optional[logging.Logger] = None):
+                 log: Optional[logging.Logger] = None, config=None):
         self.http, self.env, self.key_file, self.model_file = http, env, key_file, model_file
+        self.config = config                                  # ConfigStore: ai.chat_model, limits.ai_daily (Phase 4)
+        self._spent: dict = {}                                # (tenant, UTC day) -> provider calls made
+        self._spent_lock = threading.Lock()
         self.log = log or logging.getLogger("vr_rag.ai")
         self.models_cache = {"ids": None, "t": 0.0}           # provider model list, refreshed every 10 minutes
         self.model_choice = {"chat": None, "stt": None}       # chosen models (and "fast")
@@ -133,6 +139,8 @@ class AIGateway:
         f = _path(self.model_file)
         if f.exists() and f.read_text().strip():
             return f.read_text().strip().splitlines()[0]
+        if self.config is not None and self.config.get("ai.chat_model"):
+            return self.config.get("ai.chat_model")            # set per tenant in the config store
         p = self.provider()
         if not p:
             return ""
@@ -211,9 +219,29 @@ class AIGateway:
             if ev:
                 ev.set()
 
+    # ------------------------------------------------------------ per-tenant daily budget
+    def spend(self) -> None:
+        """Count one provider call for the current tenant; raise BudgetExceeded when its daily limit
+        (config key limits.ai_daily, 0 = no limit) is reached. Answers from the cache cost nothing."""
+        if self.config is None:
+            return
+        limit = int(self.config.get("limits.ai_daily") or 0)
+        if limit <= 0:
+            return
+        key = (current_tenant(), time.strftime("%Y-%m-%d", time.gmtime()))
+        with self._spent_lock:
+            if self._spent.get(key, 0) >= limit:
+                raise BudgetExceeded(f"this organisation's daily AI limit ({limit} calls) is used up - "
+                                     "it resets at 00:00 UTC")
+            self._spent[key] = self._spent.get(key, 0) + 1
+            for old in [k for k in self._spent if k[1] != key[1]]:      # forget earlier days
+                self._spent.pop(old, None)
+
     # ------------------------------------------------------------ provider calls
     def post_chat(self, messages, max_tokens=700, stream=False, model=None, timeout=90):
-        """Raw chat call; returns the HTTP response (caller maps status codes). Raises on network errors."""
+        """Raw chat call; returns the HTTP response (caller maps status codes). Raises on network errors,
+        BudgetExceeded when the tenant's daily AI limit is used up."""
+        self.spend()
         p = self.provider()
         extra = {"stream": True} if stream else {}
         return self.http.post(f"{p['base']}/chat/completions", json=self.chat_payload(messages, max_tokens, stream, model),
@@ -247,7 +275,8 @@ class AIGateway:
             r.close()
 
     def transcribe(self, audio: bytes, mime: str, ext: str, lang: str = "", hint: str = "", timeout=60):
-        """Raw speech-to-text call; returns the HTTP response. Raises on network errors."""
+        """Raw speech-to-text call; returns the HTTP response. Raises on network errors / BudgetExceeded."""
+        self.spend()
         p = self.provider()
         data = dict({"model": self.stt_model(), "response_format": "json", "temperature": "0"},
                     **({"language": lang} if lang else {}), **({"prompt": hint} if hint else {}))

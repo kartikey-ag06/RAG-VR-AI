@@ -10,13 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from .settings import Settings
 
 
-def create_app(settings: Settings, middleware: Iterable[Tuple[Type, dict]] = (), title: str = "VR_RAG backend") -> FastAPI:
+def create_app(settings: Settings, middleware: Iterable[Tuple[Type, dict]] = (), title: str = "VR_RAG backend",
+               lifespan=None) -> FastAPI:
     """`middleware` = [(MiddlewareClass, kwargs), ...], added in order, all INSIDE CORS.
 
     CORS is added last so it is the outermost layer: an error answered by inner middleware (429, 413) still
     carries CORS headers and the browser can show its message.
     """
-    app = FastAPI(title=title)
+    app = FastAPI(title=title, lifespan=lifespan)
     for cls, kwargs in middleware:
         app.add_middleware(cls, **(kwargs or {}))
     app.add_middleware(
@@ -36,3 +37,13 @@ def create_app(settings: Settings, middleware: Iterable[Tuple[Type, dict]] = (),
 
     app.state.settings = settings
     return app
+
+
+def keep_cors_outermost(app: FastAPI) -> None:
+    """Call after adding middleware later on (e.g. once services exist): moves CORS back to the outside, so
+    answers from other middleware (404 for a switched-off module, 401/403) still carry CORS headers."""
+    mw = app.user_middleware
+    cors = [m for m in mw if m.cls is CORSMiddleware]
+    for m in cors:
+        mw.remove(m)
+    mw[0:0] = cors

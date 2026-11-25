@@ -118,6 +118,7 @@ def isolated_backend(monkeypatch):
     backend._MODELS.update(ids=None, t=0.0)
     backend._cache.clear()
     backend._cache.update(chat=None, stt=None)
+    backend.AI._spent.clear()                       # per-tenant AI budget counters (Phase 4)
     monkeypatch.setattr(backend.HTTP, "get", fake_get)
     monkeypatch.setattr(backend.HTTP, "post", fake_post)
     yield

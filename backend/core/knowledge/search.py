@@ -76,9 +76,10 @@ def _hit(snap, i, score, kwv, semv):
 class SearchEngine:
     def __init__(self, store, tokenize: Callable, can_see: Callable, embed_model: str, db=None,
                  rrf_k: int = RRF_K, w_semantic: float = W_SEMANTIC, w_keyword: float = W_KEYWORD,
-                 low_confidence: float = LOW_CONFIDENCE):
+                 low_confidence: float = LOW_CONFIDENCE, config_get: Optional[Callable] = None):
         self.store, self.tokenize, self.can_see, self.embed_model, self.db = store, tokenize, can_see, embed_model, db
         self.rrf_k, self.w_semantic, self.w_keyword, self.low_confidence = rrf_k, w_semantic, w_keyword, low_confidence
+        self.config_get = config_get          # key -> value (core.config, per tenant); None = constructor values
         self.emb = {"state": "warming", "model": None, "error": None}       # embedding model, loaded in background
 
     # ------------------------------------------------------------ embeddings
@@ -152,5 +153,6 @@ class SearchEngine:
         order = [int(i) for i in np.argsort(-rrf)[:k] if rrf[i] > 0]
         conf = float(max((sem[i] for i in order), default=0.0))
         return dict(out, mode="hybrid", engine=engine, model=self.embed_model, conf=round(conf, 3),
-                    lowConfidence=conf < self.low_confidence,
+                    lowConfidence=conf < (self.config_get("search.low_confidence") if self.config_get
+                                          else self.low_confidence),
                     hits=[_hit(snap, i, float(rrf[i]), float(kw[i]), float(sem[i])) for i in order])

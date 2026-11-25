@@ -33,6 +33,7 @@ import socket
 import sys
 import threading
 import webbrowser
+from contextlib import asynccontextmanager
 import gzip
 import hashlib
 from pathlib import Path
@@ -48,7 +49,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from indexer import Store, tokenize
-from core.kernel import Container, Settings, create_app
+from core.kernel import Container, Settings, create_app, keep_cors_outermost
 
 # ---------------------------------------------------------------- settings + app shell (core/kernel)
 SETTINGS = Settings.from_env(Path(__file__).resolve().parent.parent, sys.argv, os.environ)
@@ -60,12 +61,16 @@ DATA_DIR = SETTINGS.data_dir          # VR_RAG_DATA_DIR moves the document store
 limits.setup_logging()
 # Load protection (rate limits, body-size limits, AI budget + concurrency, request ids) sits INSIDE CORS, so a
 # 429 / 413 answer still carries CORS headers and the browser can show its message. /healthz comes from the factory.
-app = create_app(SETTINGS, middleware=[(LoadGuard, {})])
+@asynccontextmanager
+async def lifespan(_app):
+    """Start-up work (replaces the old, deprecated startup-event hook): load the embedding model in the background."""
+    threading.Thread(target=lambda: load_embeddings(), daemon=True).start()
+    yield
 
 
-@app.on_event("startup")
-def on_startup():
-    threading.Thread(target=load_embeddings, daemon=True).start()
+app = create_app(SETTINGS, middleware=[(LoadGuard, {})], lifespan=lifespan)
+
+
 
 # ---------------------------------------------------------------- shared services (built once, in this order)
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
@@ -73,6 +78,9 @@ def on_startup():
 from core.data import DB, LocalKV, database_url
 from auth import Auth
 from core.identity import ApiKeys, Identity, TenantContext, Tenants
+from core.config import ConfigStore
+from core.modules import Module, ModuleGate, ModuleRegistry
+from core.observability import AuditLog
 from core.data.tenancy import current_tenant, doc_tenant
 
 
@@ -96,6 +104,9 @@ SERVICES.register("auth", lambda c: Auth(c.get("kv")))
 SERVICES.register("tenants", lambda c: Tenants(c.get("kv")))
 SERVICES.register("keys", lambda c: ApiKeys(c.get("kv"), c.get("tenants")))
 SERVICES.register("identity", lambda c: Identity(c.get("keys"), c.get("auth")))
+SERVICES.register("config", lambda c: ConfigStore(c.get("kv")))
+SERVICES.register("audit", lambda c: AuditLog(c.get("kv")))
+SERVICES.register("modules", lambda c: ModuleRegistry(c.get("kv")))
 app.state.services = SERVICES
 
 # old global names kept as aliases, so feature modules and tests keep working unchanged
@@ -105,12 +116,38 @@ KV = SERVICES.get("kv")
 AUTH = SERVICES.get("auth")
 IDENTITY = SERVICES.get("identity")       # who is calling: tenant + scopes (core/identity, Phase 4)
 SERVICES.get("tenants").ensure_default()
+CONFIG = SERVICES.get("config")           # central settings: global < tenant < tenant+module (core/config)
+AUDIT = SERVICES.get("audit")             # who did what (core/observability)
+MODULES = SERVICES.get("modules")         # feature modules + on/off per tenant (core/modules)
+CONFIG.declare("ai.chat_model", "string", "", "Chat model for this scope; empty = choose automatically")
+CONFIG.declare("search.low_confidence", "number", 0.62, "Best semantic match below this = low confidence",
+               min=0.0, max=1.0)
+CONFIG.declare("limits.ai_daily", "integer", 0, "AI provider calls per tenant per UTC day; 0 = no limit", min=0)
+for _m in [
+    Module("assistant", "Assistant", "capability", ("/api/assistant", "/api/calendar", "/api/notes", "/api/reminders",
+                                                   "/api/translate", "/api/weather"), "Reminders, notes, weather, translate"),
+    Module("calendar_sync", "Calendar sync", "capability", ("/api/calendar/sources",), "ICS calendar subscriptions"),
+    Module("navigation", "Navigation", "capability", ("/api/directions", "/api/places"), "Walking directions"),
+    Module("meetings", "Meetings", "capability", ("/api/meetings", "/api/teleprompter"), "Meeting notes, teleprompter"),
+    Module("expert", "Remote expert", "capability", ("/api/expert", "/expert"), "Live video help (WebRTC)"),
+    Module("sessions", "Work sessions", "capability", ("/api/sessions", "/api/pins", "/api/workflows", "/workspace"),
+           "Guided workflows, audit trail, report export, pins"),
+    Module("connectors", "Connectors", "capability", ("/api/connectors",), "Email/webhook + cloud document sync"),
+    Module("vision", "Photo questions", "capability", ("/api/vision",), "Scan, then ask"),
+    Module("industrial_field_ops", "Industrial Field Ops", "pack", ("/api/procops", "/procops", "/api/machines"),
+           "SOP question heatmap + AI redline (ProcOps), machine tags"),
+]:
+    MODULES.add(_m)
+# order matters: the LAST middleware added runs FIRST. TenantContext must set the tenant before ModuleGate checks it.
+app.add_middleware(ModuleGate, registry=MODULES)        # 404 for modules switched off for this tenant (Phase 4)
 app.add_middleware(TenantContext, identity=IDENTITY)   # sets the request's tenant for the data layer (Phase 4)
+keep_cors_outermost(app)                                 # CORS stays the outer layer
 # ---------------------------------------------------------------- search -> core/knowledge
 from core.knowledge import LOW_CONFIDENCE, SearchEngine, norm_code
 from core.knowledge.search import RRF_K, W_KEYWORD, W_SEMANTIC  # noqa: F401  (old names, still importable)
 
-SEARCH = SearchEngine(STORE, tokenize=tokenize, can_see=AUTH.can_see_doc, embed_model=EMBED_MODEL, db=DBX)
+SEARCH = SearchEngine(STORE, tokenize=tokenize, can_see=AUTH.can_see_doc, embed_model=EMBED_MODEL, db=DBX,
+                      config_get=CONFIG.get)
 EMB = SEARCH.emb                       # same dict: status pages read EMB["state"]
 load_embeddings = SEARCH.load_embeddings
 
@@ -178,6 +215,8 @@ async def files_upload(req: Request, files: list[UploadFile] = File(...)):
                                                  tenant_id=current_tenant()))
         except ValueError as e:
             errors.append(str(e))
+    for a in added:
+        AUDIT.record("document.upload", _actor(req), a.get("uid", ""), details={"name": a.get("name")})
     return JSONResponse({"added": added, "errors": errors}, status_code=200 if added or not errors else 400)
 
 
@@ -185,8 +224,10 @@ async def files_upload(req: Request, files: list[UploadFile] = File(...)):
 def files_delete(uid: str, req: Request):
     if AUTH.admin_required(req) and not AUTH.is_admin(req):
         return JSONResponse({"error": "admin token required"}, 403)
-    if not re.fullmatch(r"[0-9a-f]{12}", uid) or not STORE.delete(uid):
+    e = _own_doc(uid)
+    if not e or not STORE.delete(uid):
         return JSONResponse({"error": "not found"}, 404)
+    AUDIT.record("document.delete", _actor(req), uid, details={"name": e.get("name")})
     return {"deleted": uid}
 
 
@@ -198,7 +239,9 @@ def files_patch(uid: str, req: Request, _body=JSONB):
     b = (_body if _body is not None else {})
     clean = lambda v, n: None if v is None else [str(x).strip()[:60] for x in (v if isinstance(v, list) else str(v).split(",")) if str(x).strip()][:n]
     e = STORE.update_meta(uid, title=(str(b["title"])[:200] if b.get("title") else None),
-                          tags=clean(b.get("tags"), 30), groups=clean(b.get("groups"), 20)) if re.fullmatch(r"[0-9a-f]{12}", uid) else None
+                          tags=clean(b.get("tags"), 30), groups=clean(b.get("groups"), 20)) if _own_doc(uid) else None
+    if e:
+        AUDIT.record("document.update", _actor(req), uid, details={k: b[k] for k in ("title", "tags", "groups") if k in b})
     return e or JSONResponse({"error": "not found"}, 404)
 
 
@@ -310,11 +353,12 @@ def rag_page(name: str, req: Request):
 
 # ---------------------------------------------------------------- LLM provider (Groq / Grok) -> core/ai
 from core.ai import AIGateway, SseReader, clean_messages
+from core.sdk.context import BudgetExceeded
 
 KEY_FILE = ROOT / "grok_api_key.txt"
 MODEL_FILE = ROOT / "grok_model.txt"
 # key_file / model_file are read through these lambdas so a test can still swap KEY_FILE / MODEL_FILE on this module
-AI = AIGateway(HTTP, os.environ, key_file=lambda: KEY_FILE, model_file=lambda: MODEL_FILE, log=log)
+AI = AIGateway(HTTP, os.environ, key_file=lambda: KEY_FILE, model_file=lambda: MODEL_FILE, log=log, config=CONFIG)
 
 # old names kept as aliases: feature modules (vision, api_v1, procops, ...) and tests use them unchanged
 get_key, provider, list_models = AI.get_key, AI.provider, AI.list_models
@@ -383,6 +427,8 @@ def grok(req: Request, _body=JSONB):
                 return {"choices": [{"message": {"role": "assistant", "content": AI.cached(key)}}], "cached": True, "shared": True}
         try:
             r = AI.post_chat(messages)
+        except BudgetExceeded as e:
+            return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
         except Exception as e:
             log.warning("AI provider unreachable: %s", e)
             return JSONResponse({"error": f"{p['name']} is unreachable - try again shortly"}, 502)
@@ -415,6 +461,8 @@ def grok_stream(req: Request, _body=JSONB):
         return Response(AI.cached(key), media_type="text/plain; charset=utf-8", headers={"X-Cache": "hit"})
     try:
         r = AI.post_chat(messages, stream=True)
+    except BudgetExceeded as e:
+        return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
     except Exception as e:
         log.warning("AI provider unreachable: %s", e)
         return JSONResponse({"error": f"{p['name']} is unreachable - try again shortly"}, 502)
@@ -457,6 +505,8 @@ async def stt(req: Request):
     ext = {"audio/ogg": "ogg", "audio/mp4": "m4a", "audio/wav": "wav", "audio/mpeg": "mp3"}.get(mime, "webm")
     try:
         r = await run_in_threadpool(AI.transcribe, audio, mime, ext, lang, hint)
+    except BudgetExceeded as e:
+        return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
     except Exception as e:
         log.warning("speech-to-text unreachable: %s", e)
         return JSONResponse({"error": "speech service unreachable - try again shortly"}, 502)
@@ -495,6 +545,21 @@ _register("navigation", lambda: navigation.register(app))
 _register("meetings", lambda: meetings.register(app, KV, llm_complete, run_search, AUTH))
 
 
+def _actor(req):
+    """Who did it, for the audit log: kind + name/id of the caller (never a token)."""
+    try:
+        p = IDENTITY.resolve(req)[0]
+        return f"{p.kind}:{p.name or p.id or 'anonymous'}"
+    except Exception:
+        return "unknown"
+
+
+def _own_doc(uid):
+    """A document of the CURRENT tenant, or None (another tenant's document looks like it does not exist)."""
+    e = STORE.doc_entry(uid) if re.fullmatch(r"[0-9a-f]{12}", uid or "") else None
+    return e if e and doc_tenant(e) == current_tenant() else None
+
+
 # ---------------------------------------------------------------- admin: users (RBAC) + status
 @app.get("/admin")
 def admin_page():
@@ -517,6 +582,8 @@ def admin_user_add(req: Request, _body=JSONB):
     b = (_body if _body is not None else {})
     groups = b.get("groups") if isinstance(b.get("groups"), list) else str(b.get("groups", "")).split(",")
     rec, token = AUTH.create_user(str(b.get("name", "user")), groups, str(b.get("role", "user")))
+    AUDIT.record("user.create", _actor(req), rec["id"], details={"name": rec["name"], "role": rec["role"],
+                                                                 "groups": rec["groups"]})
     return {"user": AUTH.public(rec), "token": token, "note": "Copy the token now - it is not shown again."}
 
 
@@ -525,13 +592,14 @@ def admin_user_delete(uid: str, req: Request):
     if not AUTH.is_admin(req):
         return JSONResponse({"error": "admin only"}, 403)
     AUTH.delete_user(uid)
+    AUDIT.record("user.delete", _actor(req), uid)
     return {"deleted": uid}
 
 
 VISION = None
 try:
     import vision
-    VISION = vision.register(app, provider, get_key, list_models, ROOT, AUTH)   # "scan, then ask" (photo questions)
+    VISION = vision.register(app, provider, get_key, list_models, ROOT, AUTH, spend=AI.spend)   # "scan, then ask" (photo questions)
 except Exception as _e:
     print(f"[vision] disabled: {_e}", flush=True)
 
@@ -539,10 +607,11 @@ except Exception as _e:
 # ---------------------------------------------------------------- one API for every glasses client ("many doors")
 import api_v1
 CORE = _register("api v1", lambda: api_v1.register(app, STORE, run_search, llm_complete, llm_stream, AUTH, provider, VISION,
-                                                   identity=IDENTITY))
+                                                   identity=IDENTITY, config=CONFIG))
 _register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE, identity=IDENTITY))
 from core.admin import register_admin
-_register("control plane", lambda: register_admin(app, IDENTITY, SERVICES.get("tenants"), SERVICES.get("keys")))
+_register("control plane", lambda: register_admin(app, IDENTITY, SERVICES.get("tenants"), SERVICES.get("keys"),
+                                                    config=CONFIG, modules=MODULES, audit=AUDIT))
 
 
 @app.post("/api/server/stop")
