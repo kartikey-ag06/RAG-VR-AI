@@ -17,5 +17,6 @@ Rules
 | [0005](0005-control-plane.md) | Control plane: settings, modules on/off, limits, audit | Accepted |
 | [0006](0006-integration-framework.md) | Integration framework: manifests, register(ctx), event bus | Accepted |
 | [0007](0007-industrial-field-ops-pack.md) | Industrial Field Ops: the first sector pack | Accepted |
+| [0008](0008-healthcare-sop-pack.md) | Healthcare Clinical SOP: second sector pack with zero Core changes | Accepted |
 
 Full plan: "VR_RAG – Centralized Core Engine Architecture Plan" (claude.ai doc, 24 Nov 2026).

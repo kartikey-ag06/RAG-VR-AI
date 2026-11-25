@@ -146,6 +146,26 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
     def config_history(req: Request, key: str = "", limit: int = 100):
         return guard(req) or {"history": config.history(key or None, max(1, min(1000, limit)))}
 
+    @app.post("/api/core/config/rollback")
+    def config_rollback(req: Request, body: dict = Body(...)):
+        if (g := guard(req)) is not None:
+            return g
+        t = body.get("tenant_id") or None
+        if t and no_tenant(t):
+            return bad(f"no tenant {t!r}", 404)
+        if "version" not in body:
+            return bad("version is required")
+        try:
+            rec = config.rollback(str(body.get("key", "")), body["version"], t, body.get("module") or None, actor(req))
+        except LookupError as e:
+            return bad(e, 404)
+        except ConfigError as e:
+            return bad(e)
+        log(req, "config.rollback", rec["id"], tenant_id=t or "default", key=rec["key"], scope=rec["scope"],
+            version=rec["version"], restored_version=body["version"])
+        event("config.changed", t or "default", key=rec["key"], scope=rec["scope"])     # never the value
+        return {"config": rec}
+
     # ------------------------------------------------------------ modules on / off
     @app.get("/api/core/packs")
     def packs(req: Request, tenant_id: str = "default"):
