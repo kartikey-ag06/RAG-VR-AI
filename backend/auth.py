@@ -14,6 +14,8 @@ import os
 import secrets
 import time
 
+from core.data.tenancy import current_tenant, doc_tenant
+
 LOCAL = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
@@ -53,6 +55,12 @@ class Auth:
         if not user:
             return False
         return user.get("role") == "admin" or bool(set(user.get("groups", [])) & set(doc_groups))
+
+    def can_see_doc(self, entry, user):
+        """Document permission: same TENANT as the current request (Phase 4) AND the group rule above."""
+        if not entry or doc_tenant(entry) != current_tenant():
+            return False
+        return self.can_see(entry.get("groups", []), user)
 
     def is_local(self, req):
         if not req or not req.client:

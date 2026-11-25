@@ -41,6 +41,7 @@ from pathlib import Path
 
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from core.data.tenancy import current_tenant, doc_tenant
 from core.sdk.context import PolicyDenied
 
 from net import JSONB
@@ -154,7 +155,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                             status)
 
     def visible(entry, user):
-        return bool(entry) and auth.can_see(entry.get("groups", []), user)
+        return bool(entry) and auth.can_see_doc(entry, user)
 
     # ------------------------------------------------------------ shared pieces
     def page_url(uid, page, w=None):
@@ -267,7 +268,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                 continue
             c = chunks[i]
             d = docs[c["doc"]]
-            if not auth.can_see(d.get("groups", []), user):
+            if not auth.can_see_doc(d, user):
                 continue
             hits.append({"i": i, "score": 0.0, "kw": None, "sem": None, "doc": c["doc"], "page": c["page"],
                          "uid": d["uid"], "title": d["title"], "text": c["text"]})
@@ -286,7 +287,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             except Exception:
                 vis = False
         return {"api": "v1", "ok": True, "ai": bool(p), "provider": p["name"] if p else "",
-                "photo": vis, "documents": len(snap["index"]["docs"]), "index_version": snap["version"],
+                "photo": vis, "documents": sum(1 for d in snap["index"]["docs"] if doc_tenant(d) == current_tenant()),
+                "index_version": snap["version"],
                 "styles": list(STYLES), "doors": {"mcp": "/mcp", "hud": "/hud", "webxr": "/"}}
 
     @app.get(f"{API}/documents")
@@ -296,7 +298,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             return denied(user)
         docs = [{"doc_uid": d["uid"], "title": d["title"], "pages": d["pages"], "type": d.get("type", ""),
                  "machine_ids": d.get("tags", [])}
-                for d in store.snapshot["index"]["docs"] if d.get("uid") and auth.can_see(d.get("groups", []), user)]
+                for d in store.snapshot["index"]["docs"] if d.get("uid") and auth.can_see_doc(d, user)]
         return {"documents": docs, "index_version": store.snapshot["version"]}
 
     @app.post(f"{API}/search")

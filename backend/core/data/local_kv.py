@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+from .tenancy import DEFAULT_TENANT, tenant_for_kind
+
 
 class LocalKV:
     """Same small-record API on local JSON files (used when no database is configured)."""
@@ -18,7 +20,14 @@ class LocalKV:
         self.lock = threading.Lock()
 
     def _file(self, kind):
-        return self.root / f"{kind}.json"
+        """default tenant (and global kinds): app_data/<kind>.json - the same files as before Phase 4.
+        Any other tenant: app_data/tenants/<tenant>/<kind>.json."""
+        t = tenant_for_kind(kind)
+        if t == DEFAULT_TENANT:
+            return self.root / f"{kind}.json"
+        d = self.root / "tenants" / t
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{kind}.json"
 
     def _load(self, kind):
         f = self._file(kind)

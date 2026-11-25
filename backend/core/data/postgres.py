@@ -20,6 +20,9 @@ import threading
 import time
 from pathlib import Path
 
+from . import migrations
+from .tenancy import current_tenant, tenant_for_kind
+
 SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS docs (
@@ -58,6 +61,7 @@ class DB:
         self.conn = None
         with self.lock:
             self._exec(SCHEMA.replace("%(dim)s", str(dim)))
+            migrations.run(self.conn)                      # versioned changes after the base tables (Phase 4)
 
     # ---------- connection with one automatic reconnect (Neon suspends idle computes)
     def _connect(self):
@@ -159,25 +163,29 @@ class DB:
 
     # ---------- events (question log)
     def add_event(self, ev):
-        self.x("INSERT INTO events(data) VALUES (%s)", (json.dumps(ev),))
+        self.x("INSERT INTO events(tenant_id, data) VALUES (%s, %s)", (current_tenant(), json.dumps(ev)))
 
     def events(self):
-        return [r[0] for r in self.q("SELECT data FROM events WHERE NOT archived ORDER BY id")]
+        return [r[0] for r in self.q("SELECT data FROM events WHERE tenant_id = %s AND NOT archived ORDER BY id",
+                                     (current_tenant(),))]
 
     def archive_events(self):
-        self.x("UPDATE events SET archived = true WHERE NOT archived")
+        self.x("UPDATE events SET archived = true WHERE tenant_id = %s AND NOT archived", (current_tenant(),))
 
     # ---------- small JSON records
     def kv_put(self, kind, id_, data):
-        self.x("INSERT INTO app_data(kind, id, data) VALUES (%s, %s, %s) ON CONFLICT (kind, id) DO UPDATE SET "
-               "data = EXCLUDED.data, updated = now()", (kind, str(id_), json.dumps(data)))
+        t = tenant_for_kind(kind)
+        self.x("INSERT INTO app_data(tenant_id, kind, id, data) VALUES (%s, %s, %s, %s) ON CONFLICT (tenant_id, kind, id) "
+               "DO UPDATE SET data = EXCLUDED.data, updated = now()", (t, kind, str(id_), json.dumps(data)))
 
     def kv_get(self, kind, id_):
-        r = self.q("SELECT data FROM app_data WHERE kind = %s AND id = %s", (kind, str(id_)))
+        r = self.q("SELECT data FROM app_data WHERE tenant_id = %s AND kind = %s AND id = %s",
+                   (tenant_for_kind(kind), kind, str(id_)))
         return r[0][0] if r else None
 
     def kv_list(self, kind):
-        return [r[0] for r in self.q("SELECT data FROM app_data WHERE kind = %s ORDER BY updated DESC", (kind,))]
+        return [r[0] for r in self.q("SELECT data FROM app_data WHERE tenant_id = %s AND kind = %s ORDER BY updated DESC",
+                                     (tenant_for_kind(kind), kind))]
 
     def kv_delete(self, kind, id_):
-        self.x("DELETE FROM app_data WHERE kind = %s AND id = %s", (kind, str(id_)))
+        self.x("DELETE FROM app_data WHERE tenant_id = %s AND kind = %s AND id = %s", (tenant_for_kind(kind), kind, str(id_)))

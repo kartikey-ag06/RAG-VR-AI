@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Request
+
+from core.data.tenancy import DEFAULT_TENANT, current_tenant
 from fastapi.responses import FileResponse, JSONResponse
 
 UID = re.compile(r"[0-9a-f]{12}")
@@ -32,10 +34,16 @@ NO_CACHE = {"Cache-Control": "no-store"}
 
 class EventLog:
     def __init__(self, path: Path, db=None):
-        self.path = path
+        self._path = path
         self.db = db                       # Postgres when configured (survives server restarts)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
+
+    @property
+    def path(self):
+        """default tenant: the same file as before Phase 4; others: events.<tenant>.jsonl next to it."""
+        t = current_tenant()
+        return self._path if t == DEFAULT_TENANT else self._path.with_name(f"{self._path.stem}.{t}{self._path.suffix}")
 
     def add(self, ev):
         if self.db:
@@ -63,7 +71,7 @@ class EventLog:
             return self.db.archive_events()
         with self.lock:
             if self.path.exists():
-                self.path.replace(self.path.with_name(f"events.{int(time.time())}.bak"))
+                self.path.replace(self.path.with_name(f"{self.path.stem}.{int(time.time())}.bak"))
 
 
 def norm_q(q):
@@ -108,7 +116,7 @@ def register(app, store, llm, root: Path, auth=None):
 
     def visible(uid, req):
         e = store.doc_entry(uid)
-        return bool(e) and (auth is None or auth.can_see(e.get("groups", []), auth.user_of(req)))
+        return bool(e) and (auth is None or auth.can_see_doc(e, auth.user_of(req)))
     page_html = root / "backend" / "static" / "procops.html"
 
     @app.get("/procops")
@@ -165,7 +173,7 @@ def register(app, store, llm, root: Path, auth=None):
         for e in store.list():
             if e["status"] != "ready":
                 continue
-            if auth is not None and req is not None and not auth.can_see(e.get("groups", []), user):
+            if auth is not None and req is not None and not auth.can_see_doc(e, user):
                 continue
             revs = store.revisions(e["uid"])
             pages, total_open = [], 0

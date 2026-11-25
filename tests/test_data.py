@@ -164,3 +164,37 @@ def test_pg_chunks_and_semantic_search(pg):
     finally:
         pg.delete_doc(uid)
     assert pg.chunk_count(uid, "test-model") == 0
+
+
+# ---------------------------------------------------------------- Phase 4 part 2b: migrations + tenants on Postgres
+@needs_db
+def test_pg_migrations_applied_once(pg):
+    from core.data import migrations
+    rows = pg.q("SELECT version FROM schema_migrations ORDER BY version")
+    assert [r[0] for r in rows] == [m[0] for m in migrations.MIGRATIONS]
+    assert migrations.run(pg.conn, log=lambda *_: None) == []                 # second run: nothing to do
+    pk = pg.q("SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+              "WHERE i.indrelid = 'app_data'::regclass AND i.indisprimary")
+    assert {r[0] for r in pk} == {"tenant_id", "kind", "id"}
+
+
+@needs_db
+def test_pg_kv_and_events_are_per_tenant(pg):
+    from core.data.tenancy import use_tenant
+    k = _kind()
+    try:
+        pg.kv_put(k, "same-id", {"who": "default"})
+        with use_tenant("acme-test"):
+            assert pg.kv_get(k, "same-id") is None and pg.kv_list(k) == []
+            pg.kv_put(k, "same-id", {"who": "acme"})                            # same kind + id, other tenant: no clash
+            assert pg.kv_get(k, "same-id") == {"who": "acme"}
+            marker = "test_" + uuid.uuid4().hex
+            pg.add_event({"q": marker})
+            assert any(e.get("q") == marker for e in pg.events())
+        assert pg.kv_get(k, "same-id") == {"who": "default"}
+        assert not any(e.get("q") == marker for e in pg.events())             # default never sees acme's log
+    finally:
+        pg.kv_delete(k, "same-id")
+        with use_tenant("acme-test"):
+            pg.kv_delete(k, "same-id")
+            pg.x("DELETE FROM events WHERE tenant_id = %s", ("acme-test",))

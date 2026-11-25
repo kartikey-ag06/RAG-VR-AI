@@ -322,7 +322,7 @@ def register(app, kv, llm, search, store, connectors, root, auth):
     @app.get("/api/pins/page/{uid}/{page}")
     def pin_page_image(uid: str, page: int, req: Request):
         e = store.doc_entry(uid) if re.fullmatch(r"[0-9a-f]{12}", uid) else None
-        ok = e and auth.can_see(e.get("groups", []), auth.user_of(req))
+        ok = e and auth.can_see_doc(e, auth.user_of(req))
         p = store.page_image_uid(uid, page) if ok else None
         return FileResponse(p, media_type="image/jpeg") if p else JSONResponse({"error": "not found"}, 404)
 
