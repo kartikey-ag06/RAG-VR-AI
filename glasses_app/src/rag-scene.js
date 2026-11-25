@@ -495,7 +495,7 @@ export function setupRag(world) {
       if (d) { docId = d.id; page = mesh.userData.pin.page; }
     }
     if (docId < 0 || state.busy) return;
-    const hits = state.index.data.chunks.map((c) => ({ chunk: c, doc: state.index.data.docs[c.doc] })).filter((h) => h.chunk.doc === docId && h.chunk.page === page).slice(0, 6);
+    const hits = state.index.data.chunks.map((c, i) => ({ chunk: c, doc: state.index.data.docs[c.doc], i })).filter((h) => h.chunk.doc === docId && h.chunk.page === page).slice(0, 6);
     if (!hits.length) return;
     hud.toast('👁 You are looking at this page - explaining it', 'info', 3500);
     state.busy = true; state.query = `(looking at) ${hits[0].doc.title} p.${page}`; state.answer = 'Reading the page...'; syncDom();

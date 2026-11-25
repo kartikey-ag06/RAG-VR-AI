@@ -32,7 +32,7 @@ function noteLimit(r) {
 function cooldownMsg() {
   return `Too many requests - please wait ${Math.max(1, Math.ceil((aiBlockedUntil - Date.now()) / 1000))} s`;
 }
-const AI_PATHS = ["/api/grok", "/api/translate", "/api/assistant/intent", "/api/vision/", "/api/workflows/generate", "/api/teleprompter/script"];
+const AI_PATHS = ["/api/v1/ask", "/api/grok", "/api/translate", "/api/assistant/intent", "/api/vision/", "/api/workflows/generate", "/api/teleprompter/script"];
 
 export async function api(path, body, method) {
   if (Date.now() < aiBlockedUntil && AI_PATHS.some(p => path.startsWith(p))) throw new Error(cooldownMsg());
@@ -85,14 +85,14 @@ export class RagIndex {
     }
     norm = Math.sqrt(norm);
     const hits = [];
-    for (const ch of this.data.chunks) {
+    this.data.chunks.forEach((ch, n) => {
       let s = 0;
       for (let i = 0; i < ch.terms.length; i++) {
         const qw = q.get(ch.terms[i]);
         if (qw) s += qw * ch.weights[i];
       }
-      if (s > 0) hits.push({ chunk: ch, doc: this.data.docs[ch.doc], score: s / norm });
-    }
+      if (s > 0) hits.push({ chunk: ch, doc: this.data.docs[ch.doc], score: s / norm, i: n });   // i: chunk position
+    });
     hits.sort((a, b) => b.score - a.score);
     return hits.slice(0, topK);
   }
@@ -124,10 +124,7 @@ export async function serverIndexVersion() {
 }
 
 // ---------------- Generation ----------------
-const SYSTEM = "You are a legal research assistant answering questions about SEBI (Securities and Exchange Board of India) " +
-  "enforcement orders involving Reliance Industries. Answer ONLY from the provided excerpts. " +
-  "Be concise (max 120 words). Cite sources as [n]. If the excerpts do not contain the answer, say so.";
-
+// Answers come from the server: /api/v1/ask builds the prompt from its own index (ADR 0004).
 export async function loadLlmConfig() {
   let cfg = { provider: "auto" };
   try { cfg = await (await fetch(import.meta.env.BASE_URL + "rag/llm_config.json")).json(); } catch { /* defaults */ }
@@ -186,8 +183,8 @@ export function extractive(question, hits) {
 // Groq decides: if the PDF excerpts answer it -> cite them (and the app shows that PDF page);
 // otherwise -> a general-knowledge answer, clearly labelled, with no PDF page.
 const SMART_SYSTEM =
-  "You are the assistant inside a VR app. You receive numbered excerpts from the user's uploaded documents " +
-  "(for example SEBI enforcement orders about Reliance Industries), plus a user question that may or may not be about them.\n" +
+  "You are the assistant inside a VR app. You receive numbered excerpts from the user's uploaded documents, " +
+  "plus a user question that may or may not be about them.\n" +
   "Rules:\n" +
   "1. If the excerpts contain the answer (fully or partly), answer from them and cite like [1], [2]. " +
   "Your FIRST line must be exactly: SOURCE: PDF [n, m] (the excerpt numbers you used, most important first).\n" +
@@ -207,9 +204,11 @@ export function cleanBody(raw) {
 
 export async function answerSmart(question, hits, cfg, onDelta) {
   if (cfg.provider === "none") {
-    if (!hits.length) return { text: "No matching text in the 10 SEBI orders, and no AI is connected for general questions.", mode: "offline", cited: [] };
+    if (!hits.length) return { text: "No matching text in your documents, and no AI is connected for general questions.", mode: "offline", cited: [] };
     return { text: extractive(question, hits), mode: "offline", cited: hits.map((_, i) => i) };
   }
+  if (usesServer(cfg)) return askServerSafe(question, hits, null, onDelta,
+    (e) => ({ text: `AI error (${cfg.provider}): ${e.message}\n\n` + (hits.length ? extractive(question, hits) : ""), mode: "offline", cited: hits.map((_, i) => i) }));
   const user = (hits.length ? buildPrompt(question, hits) : "Excerpts: (none matched)\n\nQuestion: " + question);
   let raw;
   try { raw = await callLlm(SMART_SYSTEM + styleRules(), user, cfg, onDelta); }
@@ -241,6 +240,76 @@ export function stopAnswer() { if (!current) return false; current.abort(); curr
 const STOPPED = "(stopped)";
 const isAbort = (e) => e && (e.name === "AbortError" || e.message === STOPPED);
 
+// ---------------- Server answers: /api/v1/ask (+ /stream) ----------------
+// The glasses send the QUESTION, the answer style and REFERENCES to the passages they found (chunk i, doc, page).
+// The server reads the passage text from its own index, checks permissions, builds the prompt and calls the AI.
+// `cited` in the reply = positions in OUR hits list, so the page shown is the one the answer used.
+const usesServer = (cfg) => cfg.provider === "grok" || cfg.provider === "groq";
+
+function askBody(question, hits, photoInfo) {
+  const b = { question, style: style.mode, lang: style.lang,
+    passages: hits.map((h) => ({ i: h.i ?? -1, doc_uid: h.doc.uid, page: h.chunk.page })) };
+  if (photoInfo) b.photo = { object: photoInfo.object || "", details: photoInfo.details || "",
+    text_seen: photoInfo.text_seen || "", keywords: photoInfo.keywords || "" };
+  return b;
+}
+
+function fromServer(j, hits) {
+  if (j.mode === "offline") return { text: j.answer, mode: "offline", cited: hits.map((_, i) => i).slice(0, 3) };
+  return { text: j.answer, mode: j.mode, cited: (j.cited || []).filter((i) => i >= 0 && i < hits.length) };
+}
+
+async function askServerSafe(question, hits, photoInfo, onDelta, onError) {
+  if (Date.now() < aiBlockedUntil) return onError(new Error(cooldownMsg()));
+  const ac = new AbortController(); current = ac;
+  try { return await askServer(question, hits, photoInfo, onDelta, ac.signal); }
+  catch (e) {
+    if (ac.signal.aborted || isAbort(e)) return { text: "Stopped.", mode: "offline", cited: [], stopped: true };
+    return onError(e);
+  } finally { if (current === ac) current = null; }
+}
+
+async function askServer(question, hits, photoInfo, onDelta, signal) {
+  const body = JSON.stringify(askBody(question, hits, photoInfo));
+  const headers = authHeaders({ "Content-Type": "application/json" });
+  if (onDelta && streamOk && window.TextDecoder) {
+    const r = await fetch(apiUrl("/api/v1/ask/stream"), { method: "POST", headers, body, signal });
+    noteLimit(r);
+    if (r.status === 404 || r.status === 405) streamOk = false;               // older server: plain /api/v1/ask
+    else {
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "HTTP " + r.status); }
+      const rd = r.body.getReader(), dec = new TextDecoder();
+      let buf = "", acc = "", done = null;
+      for (;;) {
+        let chunk;
+        try { chunk = await rd.read(); }
+        catch (e) {
+          if (signal.aborted && acc.trim()) return { text: cleanBody(acc) + "\n\n" + STOPPED, mode: "general", cited: [], stopped: true };
+          throw e;
+        }
+        if (chunk.done) break;
+        buf += dec.decode(chunk.value, { stream: true });
+        let cut;
+        while ((cut = buf.indexOf("\n\n")) >= 0) {                          // one server-sent event per blank line
+          const evt = buf.slice(0, cut); buf = buf.slice(cut + 2);
+          const name = (evt.match(/^event: (.*)$/m) || [])[1], data = (evt.match(/^data: (.*)$/m) || [])[1];
+          if (!data) continue;
+          const j = JSON.parse(data);
+          if (name === "delta") { acc += j.text || ""; try { onDelta(acc); } catch { /* display only */ } }
+          else if (name === "done") done = j;
+        }
+      }
+      if (!done) throw new Error("the answer stream ended early");
+      return fromServer(done, hits);
+    }
+  }
+  const r = await fetch(apiUrl("/api/v1/ask"), { method: "POST", headers, body, signal });
+  noteLimit(r);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || "HTTP " + r.status);
+  return fromServer(j, hits);
+}
+
 async function callLlm(system, user, cfg, onDelta) {
   if (Date.now() < aiBlockedUntil) throw new Error(cooldownMsg());     // don't call while the server asked us to wait
   const ac = new AbortController(); current = ac;
@@ -251,38 +320,6 @@ async function callLlm(system, user, cfg, onDelta) {
 
 async function callLlmInner(system, user, cfg, onDelta, signal) {
   let r, j;
-  if ((cfg.provider === "grok" || cfg.provider === "groq") && onDelta && streamOk && window.TextDecoder) {
-    // streamed: the first words reach the lens in ~0.5 s instead of after the whole answer
-    r = await fetch(apiUrl("/api/grok/stream"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), signal,
-      body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
-    noteLimit(r);
-    if (r.status === 404 || r.status === 405) streamOk = false;               // older server: fall back below
-    else {
-      if (!r.ok) { j = await r.json().catch(() => ({})); throw new Error(j.error || "HTTP " + r.status); }
-      const rd = r.body.getReader(), dec = new TextDecoder();
-      let acc = "";
-      for (;;) {
-        let chunk;
-        try { chunk = await rd.read(); }
-        catch (e) { if (signal.aborted && acc.trim()) return acc + "\n\n" + STOPPED; throw e; }   // keep what was written
-        const { value, done } = chunk;
-        if (done) break;
-        acc += dec.decode(value, { stream: true });
-        try { onDelta(acc); } catch { /* display only */ }
-      }
-      acc += dec.decode();
-      if (!acc.trim()) throw new Error("empty answer");
-      return acc;
-    }
-  }
-  if (cfg.provider === "grok" || cfg.provider === "groq") {
-    r = await fetch(apiUrl("/api/grok"), { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), signal,
-      body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
-    noteLimit(r);
-    j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
-    return j.choices[0].message.content;
-  }
   if (cfg.provider === "ollama") {
     r = await fetch("http://localhost:11434/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: cfg.model || "llama3.2", stream: false,
@@ -292,61 +329,6 @@ async function callLlmInner(system, user, cfg, onDelta, signal) {
     return j.message.content;
   }
   throw new Error("provider " + cfg.provider + " not supported in smart mode");
-}
-
-export async function generate(question, hits, cfg) {
-  if (!hits.length) return "No matching text found in the 10 SEBI orders. Try other keywords (penalty, insider trading, diluted EPS...).";
-  if (cfg.provider === "none") return extractive(question, hits);
-  const prompt = buildPrompt(question, hits);
-  try {
-    let r, j;
-    if (cfg.provider === "grok" || cfg.provider === "groq") {
-      if (Date.now() < aiBlockedUntil) throw new Error(cooldownMsg());
-      r = await fetch(apiUrl("/api/grok"), {
-        method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }] })
-      });
-      noteLimit(r);
-      j = await r.json();
-      if (!r.ok || j.error) throw new Error(j.error?.message || j.error || r.status);
-      return j.choices[0].message.content.trim();
-    }
-    if (cfg.provider === "ollama") {
-      r = await fetch(cfg.endpoint && cfg.endpoint.includes("/api/chat") ? cfg.endpoint : "http://localhost:11434/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: cfg.model || "llama3.2", stream: false,
-          messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }] })
-      });
-      j = await r.json();
-      if (!r.ok) throw new Error(j.error || r.status);
-      return j.message.content.trim();
-    }
-    if (cfg.provider === "anthropic") {
-      r = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true" },
-        body: JSON.stringify({ model: cfg.model || "claude-sonnet-5-5", max_tokens: 600, system: SYSTEM,
-          messages: [{ role: "user", content: prompt }] })
-      });
-      j = await r.json();
-      if (!r.ok) throw new Error(j.error?.message || r.status);
-      return j.content.filter(c => c.type === "text").map(c => c.text).join("").trim();
-    }
-    if (cfg.provider === "openai") {
-      r = await fetch(cfg.endpoint || "https://api.openai.com/v1/chat/completions", {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + cfg.apiKey },
-        body: JSON.stringify({ model: cfg.model || "gpt-4o-mini",
-          messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }] })
-      });
-      j = await r.json();
-      if (!r.ok) throw new Error(j.error?.message || r.status);
-      return j.choices[0].message.content.trim();
-    }
-    return `Unknown provider "${cfg.provider}".\n\n` + extractive(question, hits);
-  } catch (e) {
-    return `LLM error (${cfg.provider}): ${e.message}\nFalling back to offline answer:\n\n` + extractive(question, hits);
-  }
 }
 
 // ---------------- Voice: speech-to-text ----------------
@@ -390,7 +372,7 @@ export async function serverSearch(index, query, k = 8, machine = "") {
     }
     const hits = (j.hits || []).map((h) => {
       const chunk = index.data.chunks[h.i];
-      return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw };
+      return { chunk, doc: index.data.docs[chunk.doc], score: h.score, sem: h.sem, kw: h.kw, i: h.i };
     });
     return { mode: j.mode, version: j.version, hits: j.version && j.version !== index.data.version ? [] : hits,
       conf: j.conf, lowConfidence: !!j.lowConfidence, machine: j.machine, machineMatched: j.machineMatched, engine: j.engine };
@@ -438,11 +420,13 @@ const VISION_SYSTEM = SMART_SYSTEM +
  *  Only ONE vision call per photo (describePhoto); the answer comes from the normal chat model using that
  *  description, which keeps the scan inside Groq's free-tier tokens-per-minute limit. */
 export async function answerVision(question, photoInfo, hits, image, hint = "", cfg = { provider: "groq" }, onDelta) {
+  if (cfg.provider === "none" || usesServer(cfg)) return askServerSafe(question, hits.slice(0, 6), photoInfo, onDelta,
+    (e) => ({ text: `I see: ${photoInfo.object}. ${photoInfo.details || ""}\n\n(AI answer failed: ${e.message})`, mode: "general", cited: [] }));
   const seen = "PHOTO DESCRIPTION (from the vision model): " + (photoInfo.object || "unknown object") + ". " +
     (photoInfo.details ? photoInfo.details + " " : "") + "Text on it: " + (photoInfo.text_seen || "none") + ".\n\n";
   const user = seen + (hits.length ? buildPrompt(question, hits.slice(0, 6)) : "Excerpts: (none matched)\n\nQuestion: " + question);
   let raw;
-  try { raw = await callLlm(VISION_SYSTEM + styleRules(), user, cfg.provider === "none" ? { provider: "groq" } : cfg, onDelta); }
+  try { raw = await callLlm(VISION_SYSTEM + styleRules(), user, cfg, onDelta); }     // local Ollama only
   catch (e) {
     if (isAbort(e)) return { text: "Stopped.", mode: "offline", cited: [], stopped: true };
     return { text: `I see: ${photoInfo.object}. ${photoInfo.details || ""}\n\n(AI answer failed: ${e.message})`, mode: "general", cited: [] };
