@@ -164,11 +164,16 @@ def test_llm_uses_registered_prompt(protected, acme, monkeypatch):
 
 def test_call_between_modules(protected, acme):
     k = key_for(acme, ["knowledge:read"])
-    client.post("/api/v1/packs/demo_pack/notes", json={"id": "c1"}, headers=k)
-    assert client.get("/api/v1/packs/demo_caller/count", headers=k).json() == {"count": 1}
-    assert client.get("/api/v1/packs/demo_caller/sneaky", headers=k).status_code == 403        # not a dependency
-    backend.MODULES.set_enabled("demo_pack", acme, False)
-    assert client.get("/api/v1/packs/demo_caller/count", headers=k).status_code == 404         # target switched off
+    from core.data.tenancy import use_tenant
+    try:
+        client.post("/api/v1/packs/demo_pack/notes", json={"id": "c1"}, headers=k)
+        assert client.get("/api/v1/packs/demo_caller/count", headers=k).json() == {"count": 1}
+        assert client.get("/api/v1/packs/demo_caller/sneaky", headers=k).status_code == 403    # not a dependency
+        backend.MODULES.set_enabled("demo_pack", acme, False)
+        assert client.get("/api/v1/packs/demo_caller/count", headers=k).status_code == 404     # target switched off
+    finally:
+        with use_tenant(acme):
+            backend.KV.kv_delete("demo_pack.note", "c1")                  # leave no notes for other tests
 
 
 # ---------------------------------------------------------------- THE GATE: switch off -> routes + MCP tools gone
@@ -288,7 +293,8 @@ def test_packs_endpoint_lists_everything(protected):
     assert packs["demo_pack"]["mcp_tools"] == ["demo_pack_echo"] and packs["demo_pack"]["version"] == "0.1.0"
     assert packs["future_pack"]["state"] == "incompatible" and packs["future_pack"]["enabled"] is False
     assert packs["meetings"]["legacy"] is True and "/api/meetings" in packs["meetings"]["routes_prefixes"]
-    assert packs["industrial_field_ops"].get("manual")                    # moves to a manifest in Phase 6
+    assert packs["industrial_field_ops"]["state"] == "loaded" and not packs["industrial_field_ops"]["legacy"]
+    assert not any(p.get("manual") for p in packs.values())               # every module comes from a manifest now
     assert client.get("/api/core/packs/nope", headers=ADMIN).status_code == 404
     assert client.get("/api/core/events").status_code == 401
 

@@ -3,7 +3,9 @@ workflows.py - guided step-by-step procedures, work sessions, 3D pins and report
 
   /api/workflows/generate   topic (+ machine id) -> numbered steps, each citing the document page it comes from
   /api/sessions             a work session = everything asked, scanned and done (the audit trail)
-  /api/sessions/{id}/export inspection report / incident log / work order as PDF, DOCX or JSON
+  /api/sessions/kinds       which report kinds exist (a generic "summary" + kinds added by switched-on packs)
+  /api/sessions/{id}/export a report of one kind as PDF, DOCX or JSON (Industrial Field Ops adds
+                            inspection report / incident log / work order)
   /api/sessions/{id}/send   ...or straight to a connector (webhook, email, Jira, ServiceNow)
   /api/pins                 documents / answers / notes pinned in 3D space (shared with the /workspace dashboard)
   /workspace                desktop dashboard: pins, sessions, reports, reminders and notes
@@ -20,7 +22,8 @@ from datetime import datetime, timezone
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-KINDS = {"inspection": "Inspection Report", "incident": "Incident Log", "workorder": "Work Order"}
+# Report kinds are templates: the generic one is always there; packs add their own (ctx.reports.register_kind).
+GENERIC_KINDS = {"summary": {"label": "Session Report", "instructions": ""}}
 
 WF_PROMPT = (
     "You write safe, practical step-by-step procedures for field technicians wearing smart glasses. "
@@ -49,8 +52,28 @@ def parse_json(text):
     return json.loads(m.group(0)) if m else {}
 
 
-def register(app, kv, llm, search, store, connectors, root, auth):
+def register(app, kv, llm, search, store, connectors, root, auth, kinds=None, emit=None):
+    """kinds() -> {kind: {"label", "instructions"}} for the current tenant (packs that are ON); emit(name, data)."""
     page_html = root / "backend" / "static" / "workspace.html"
+
+    def all_kinds():
+        out = dict((kinds or (lambda: {}))())
+        for k, v in GENERIC_KINDS.items():
+            out.setdefault(k, v)
+        return out
+
+    def pick(kind, prefer):
+        """The asked kind if it exists, else the preferred default, else the first one (packs may be off)."""
+        ks = all_kinds()
+        for k in (kind, prefer):
+            if k in ks:
+                return k, ks[k]
+        k = next(iter(ks))
+        return k, ks[k]
+
+    @app.get("/api/sessions/kinds")
+    def report_kinds():
+        return {"kinds": [{"kind": k, "label": v["label"]} for k, v in all_kinds().items()]}
 
     # ---------- who may read a record: its creator (or admins); records made without a login are shared
     def owner_of(req):
@@ -162,7 +185,8 @@ def register(app, kv, llm, search, store, connectors, root, auth):
         return s if can_read(s, req) else JSONResponse({"error": "not found"}, 404)
 
     # ---------- reports
-    def build_report(s, kind):
+    def build_report(s, kind, spec):
+        label = spec["label"]
         cached = (s.get("reports") or {}).get(kind)
         if cached and cached.get("updated") == s["updated"]:
             return cached["report"]
@@ -175,13 +199,14 @@ def register(app, kv, llm, search, store, connectors, root, auth):
             lines.append(f"{e['t'][11:16]} {e['type']}: {txt[:500]}")
         log = "\n".join(lines) or "(empty session)"
         try:
-            d = parse_json(llm([{"role": "system", "content": REPORT_PROMPT.format(kind=KINDS[kind])},
+            system = REPORT_PROMPT.format(kind=label) + (" " + spec["instructions"] if spec.get("instructions") else "")
+            d = parse_json(llm([{"role": "system", "content": system},
                                 {"role": "user", "content": f"Machine: {s.get('machine') or 'unknown'}\nSession log:\n{log}"}], 2000))
         except Exception as e:
-            d = {"title": f"{KINDS[kind]} (AI summary unavailable)", "summary": str(e)[:200]}
-        rep = {"kind": kind, "kind_label": KINDS[kind], "session": s["id"], "created": now_iso(),
+            d = {"title": f"{label} (AI summary unavailable)", "summary": str(e)[:200]}
+        rep = {"kind": kind, "kind_label": label, "session": s["id"], "created": now_iso(),
                "started": s["started"], "machine": s.get("machine") or d.get("asset", ""),
-               "title": str(d.get("title") or KINDS[kind])[:160], "summary": str(d.get("summary", ""))[:1500],
+               "title": str(d.get("title") or label)[:160], "summary": str(d.get("summary", ""))[:1500],
                "priority": str(d.get("priority", "") or "")[:20], "status": str(d.get("status", "") or "")[:20]}
         for f in ("findings", "actions_taken", "recommended_actions", "parts_or_tools", "sources"):
             rep[f] = [str(x)[:300] for x in (d.get(f) or [])][:20]
@@ -189,6 +214,8 @@ def register(app, kv, llm, search, store, connectors, root, auth):
         rep["text"] = report_text(rep)
         s.setdefault("reports", {})[kind] = {"updated": s["updated"], "report": rep}
         kv.kv_put("session", s["id"], s)
+        if emit:
+            emit("report.created", {"kind": kind, "session": s["id"], "machine": rep["machine"]})
         return rep
 
     def report_text(r):
@@ -253,12 +280,12 @@ def register(app, kv, llm, search, store, connectors, root, auth):
         return buf.getvalue()
 
     @app.get("/api/sessions/{sid}/export")
-    def session_export(sid: str, req: Request, format: str = "pdf", kind: str = "inspection"):
+    def session_export(sid: str, req: Request, format: str = "pdf", kind: str = ""):
         s = kv.kv_get("session", sid)
         if not can_read(s, req):
             return JSONResponse({"error": "session not found"}, 404)
-        kind = kind if kind in KINDS else "inspection"
-        r = build_report(s, kind)
+        kind, spec = pick(kind, "inspection")
+        r = build_report(s, kind, spec)
         name = f"{kind}_{sid}_{datetime.now().strftime('%Y%m%d_%H%M')}"
         if format == "json":
             return Response(json.dumps(r, indent=2, ensure_ascii=False), media_type="application/json",
@@ -277,13 +304,13 @@ def register(app, kv, llm, search, store, connectors, root, auth):
         c = connectors["get"](str(b.get("connector", "")))
         if not can_read(s, req) or not c:
             return JSONResponse({"error": "session or connector not found"}, 404)
-        kind = b.get("kind") if b.get("kind") in KINDS else "workorder"
-        r = build_report(s, kind)
+        kind, spec = pick(b.get("kind"), "workorder")
+        r = build_report(s, kind, spec)
         try:
             res = connectors["send"](c, r, pdf_bytes=to_pdf(r) if c["type"] == "email" else None)
         except Exception as e:
             return JSONResponse({"error": f"{c['type']}: {e}"[:400]}, 502)
-        s["log"].append({"t": now_iso(), "type": "export", "data": {"text": f"{KINDS[kind]} sent: {res}"}})
+        s["log"].append({"t": now_iso(), "type": "export", "data": {"text": f"{spec['label']} sent: {res}"}})
         kv.kv_put("session", sid, s)
         return {"sent": res}
 

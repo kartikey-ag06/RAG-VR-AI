@@ -172,6 +172,18 @@ class DB:
     def archive_events(self):
         self.x("UPDATE events SET archived = true WHERE tenant_id = %s AND NOT archived", (current_tenant(),))
 
+    # ---------- journal: append-only module logs (core/data/journal.py), stored in `events` with a stream name
+    def journal_append(self, stream, data):
+        self.x("INSERT INTO events(tenant_id, stream, data) VALUES (%s, %s, %s)", (current_tenant(), stream, json.dumps(data)))
+
+    def journal_list(self, stream):
+        return [r[0] for r in self.q("SELECT data FROM events WHERE tenant_id = %s AND stream = %s AND NOT archived "
+                                     "ORDER BY id", (current_tenant(), stream))]
+
+    def journal_archive(self, stream):
+        self.x("UPDATE events SET archived = true WHERE tenant_id = %s AND stream = %s AND NOT archived",
+               (current_tenant(), stream))
+
     # ---------- small JSON records
     def kv_put(self, kind, id_, data):
         t = tenant_for_kind(kind)

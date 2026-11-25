@@ -7,7 +7,6 @@ or another module's records.
 """
 import logging
 import re
-import string
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
@@ -20,6 +19,8 @@ from core.sdk.manifest import Manifest
 from core.sdk.version import SDK_VERSION
 
 LOCAL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+UID = re.compile(r"[0-9a-f]{12}")
+PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 
 
 @dataclass
@@ -37,6 +38,13 @@ class Kernel:
     answer: Optional[Callable] = None  # (question, tag, style, lang, user, door) -> dict; set once /api/v1 exists
     functions: Dict[str, tuple] = field(default_factory=dict)    # "module.name" -> (module_id, fn)
     tools: Dict[str, tuple] = field(default_factory=dict)        # MCP tool name -> (module_id, McpTool, handler)
+    # ---- SDK 1.2 (Phase 6)
+    store: Any = None                  # document store (pages, text, revisions)
+    can_see: Callable = lambda entry, user: True                 # tenant + group check for one document
+    journal: Any = None                # core.data journal (append-only logs)
+    emit: Callable = lambda name, data, tenant_id=None: None     # publish a Core event
+    report_kinds: Dict[str, dict] = field(default_factory=dict)  # kind -> {module, label, instructions}
+    aliases: Dict[str, tuple] = field(default_factory=dict)      # old prefix -> (module_id, new full prefix)
 
 
 def _tenant_of(request_or_tenant) -> str:
@@ -47,19 +55,15 @@ def _tenant_of(request_or_tenant) -> str:
     return current_tenant()                      # set for this request by the TenantContext middleware
 
 
-class _Safe(dict):
-    def __missing__(self, key):
-        return "{" + key + "}"
-
-
 # ---------------------------------------------------------------- the parts
 class _Llm:
     def __init__(self, ctx: "ModuleContext"):
         self.ctx = ctx
 
     def _messages(self, prompt: str, variables: dict) -> list:
-        system = self.ctx.prompts.get(prompt)
-        system = string.Formatter().vformat(system, (), _Safe({k: str(v) for k, v in (variables or {}).items()}))
+        vars_ = {k: str(v) for k, v in (variables or {}).items()}
+        # only {name} placeholders that were passed are filled; JSON examples like {"a": 1} in a prompt stay as they are
+        system = PLACEHOLDER.sub(lambda m: vars_.get(m.group(1), m.group(0)), self.ctx.prompts.get(prompt))
         return [{"role": "system", "content": system}, {"role": "user", "content": str((variables or {}).get("input", ""))[:16000]}]
 
     def complete(self, request, *, prompt: str, variables: dict, max_tokens: int = 700) -> str:
@@ -158,6 +162,114 @@ class _Events:
         return deco
 
 
+class _Documents:
+    """The documents the CALLER may see (same tenant, same groups), read-only unless the module declared
+    'knowledge:write'. Page-level revisions are how a pack fixes a page without re-uploading the file."""
+
+    def __init__(self, ctx: "ModuleContext"):
+        self.ctx = ctx
+
+    @property
+    def _store(self):
+        return self.ctx.kernel.store
+
+    def _visible(self, request, uid, scope="knowledge:read"):
+        user = self.ctx._user(request, scope)
+        e = self._store.doc_entry(uid) if UID.fullmatch(str(uid or "")) else None
+        return e if e and self.ctx.kernel.can_see(e, user) else None
+
+    def list(self, request) -> list:
+        user = self.ctx._user(request, "knowledge:read")
+        out = []
+        for e in self._store.list():
+            if e.get("status") == "ready" and self.ctx.kernel.can_see(e, user):
+                out.append({k: e.get(k) for k in ("uid", "id", "title", "type", "pages", "tags", "status")})
+        return out
+
+    def get(self, request, uid) -> Optional[dict]:
+        e = self._visible(request, uid)
+        return {k: e.get(k) for k in ("uid", "id", "title", "type", "pages", "tags", "status")} if e else None
+
+    def page_text(self, request, uid, page, original=False) -> Optional[str]:
+        return self._store.page_text(uid, int(page), original=original) if self._visible(request, uid) else None
+
+    def page_image(self, request, uid, page, original=False):
+        """Path of the page picture (JPEG), or None."""
+        return self._store.page_image_uid(uid, int(page), original=original) if self._visible(request, uid) else None
+
+    def revisions(self, request, uid) -> Optional[dict]:
+        return self._store.revisions(uid) if self._visible(request, uid) else None
+
+    def index_version(self) -> str:
+        return self._store.snapshot["version"]
+
+    def add_revision(self, request, uid, page, text, *, summary="", approver="", evidence=0) -> dict:
+        if not self._visible(request, uid, "knowledge:write"):
+            raise PolicyDenied("document not found", 404)
+        rec = self._store.add_revision(uid, int(page), text, summary=summary, approver=approver, evidence=evidence)
+        self.ctx.kernel.emit("document.updated", {"doc_uid": uid, "fields": ["revision"], "page": int(page),
+                                                   "source": self.ctx.module_id})
+        return rec
+
+    def clear_revisions(self, request, uid=None) -> list:
+        """Back to the original pages: one document, or every document of the caller's tenant (never another
+        tenant's). Returns the uids that had revisions. Old revisions are archived, not deleted."""
+        if uid is not None:
+            if not self._visible(request, uid, "knowledge:write"):
+                raise PolicyDenied("document not found", 404)
+            uids = [uid]
+        else:
+            self.ctx._user(request, "knowledge:write")
+            uids = [d["uid"] for d in self.list(request)]
+        done = [u for u in uids if self._store.revisions(u).get("pages") or self._store.revisions(u).get("history")]
+        for u in done:
+            self._store.clear_revisions(u)
+            self.ctx.kernel.emit("document.updated", {"doc_uid": u, "fields": ["revision"], "source": self.ctx.module_id})
+        return done
+
+
+class _Journal:
+    """Append-only logs, per tenant, stream '<module_id>.<name>'."""
+
+    def __init__(self, ctx: "ModuleContext"):
+        self.ctx = ctx
+
+    def _stream(self, name):
+        if not LOCAL_NAME.match(name or ""):
+            raise ValueError(f"bad journal name {name!r}")
+        return f"{self.ctx.module_id}.{name}"
+
+    def _run(self, rot, fn):
+        self.ctx.check_enabled(rot)
+        with use_tenant(_tenant_of(rot)):
+            return fn()
+
+    def append(self, rot, name, data: dict) -> None:
+        self._run(rot, lambda: self.ctx.kernel.journal.append(self._stream(name), dict(data)))
+
+    def list(self, rot, name, limit=None) -> list:
+        return self._run(rot, lambda: self.ctx.kernel.journal.list(self._stream(name), limit))
+
+    def archive(self, rot, name) -> None:
+        self._run(rot, lambda: self.ctx.kernel.journal.archive(self._stream(name)))
+
+
+class _Reports:
+    """Report templates other capabilities offer (e.g. session reports). Shown only while this module is ON."""
+
+    def __init__(self, ctx: "ModuleContext"):
+        self.ctx = ctx
+
+    def register_kind(self, kind: str, label: str, instructions: str = "") -> None:
+        if not LOCAL_NAME.match(kind):
+            raise ValueError(f"bad report kind {kind!r}")
+        owner = self.ctx.kernel.report_kinds.get(kind, {}).get("module")
+        if owner and owner != self.ctx.module_id:
+            raise ValueError(f"report kind {kind!r} already belongs to {owner}")
+        self.ctx.kernel.report_kinds[kind] = {"module": self.ctx.module_id, "label": str(label)[:80],
+                                              "instructions": str(instructions)[:2000]}
+
+
 class LegacyBridge:
     """Old-style dependencies for capabilities that are still moving to the SDK (manifest "legacy": true).
     Packs never get this. Every use of it is migration debt - see ADR 0006."""
@@ -186,6 +298,7 @@ class ModuleContext:
         self.log = logging.getLogger(f"vr_rag.{manifest.id}")
         self.llm, self.kv, self.config = _Llm(self), _Kv(self), _Config(self)
         self.events, self.prompts = _Events(self), _Prompts(self)
+        self.documents, self.journal, self.reports = _Documents(self), _Journal(self), _Reports(self)
         self._legacy = legacy
 
     @property

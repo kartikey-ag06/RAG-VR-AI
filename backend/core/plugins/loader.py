@@ -16,6 +16,7 @@ import logging
 import sys
 import time
 import traceback
+import types
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -30,7 +31,7 @@ log = logging.getLogger("vr_rag.loader")
 
 class PackLoader:
     def __init__(self, app, kernel: Kernel, dirs: Iterable[Path], legacy_services: Optional[dict] = None,
-                 allow_scopes=None):
+                 allow_scopes=None, skip: Iterable[str] = ()):
         self.app, self.kernel = app, kernel
         self.dirs = [Path(d) for d in dirs]
         self.legacy_services = legacy_services or {}
@@ -39,6 +40,7 @@ class PackLoader:
         self.manifests: Dict[str, Manifest] = {}
         self.contexts: Dict[str, ModuleContext] = {}
         self.exports: Dict[str, object] = {}             # what legacy register() returned
+        self.skip = set(skip)                            # ids not to load at all (VR_RAG_SKIP_MODULES)
 
     # ------------------------------------------------------------ discover
     def discover(self) -> List[tuple]:
@@ -55,6 +57,8 @@ class PackLoader:
                 if m.id != sub.name:
                     self._set(sub.name, "invalid", f"folder name {sub.name!r} must equal manifest id {m.id!r}", path=sub)
                     continue
+                if m.id in self.skip:
+                    continue                                          # as if the folder were not there
                 if m.id in seen:
                     self._set(m.id, "invalid", f"duplicate module id (also in {seen[m.id]})", m, sub)
                     continue
@@ -103,11 +107,13 @@ class PackLoader:
         if missing:
             return self._set(m.id, "missing_dependency", f"needs {', '.join(missing)} (not loaded)", m, path)
         # register the module (and its URL prefixes) BEFORE running its code, so its routes are gated from the start
-        prefixes = (m.route_prefix,) + tuple(m.legacy_routes)
+        prefixes = (m.route_prefix,) + tuple(m.legacy_routes) + tuple(m.route_aliases)
         try:
             self.kernel.modules.add(Module(m.id, m.name, m.kind, prefixes, m.description))
         except ValueError as e:
             return self._set(m.id, "invalid", str(e), m, path)
+        for old, new in m.route_aliases.items():
+            self.kernel.aliases[old] = (m.id, m.route_prefix + new)      # old clients keep working
         for key, item in m.config.items():
             if not item.secret:
                 full = f"packs.{m.id}.{key}"
@@ -126,6 +132,8 @@ class PackLoader:
             self.kernel.bus.unsubscribe_module(m.id)
             for name in [n for n, v in self.kernel.tools.items() if v[0] == m.id]:
                 self.kernel.tools.pop(name)
+            for kind in [k for k, v in self.kernel.report_kinds.items() if v["module"] == m.id]:
+                self.kernel.report_kinds.pop(kind)
             self.kernel.modules.mark_broken(m.id)                 # its routes answer 404 from now on
             log.warning("module %s failed to load: %s", m.id, e)
             return self._set(m.id, "failed", f"{type(e).__name__}: {e}", m, path,
@@ -140,6 +148,10 @@ class PackLoader:
                          warnings=[f"MCP tool {t} declared but has no handler" for t in missing_tools])
 
     def _import(self, module_id: str, path: Path):
+        if "vr_rag_modules" not in sys.modules:                  # parent package, so modules can use relative imports
+            root = types.ModuleType("vr_rag_modules")
+            root.__path__ = []
+            sys.modules["vr_rag_modules"] = root
         name = f"vr_rag_modules.{module_id}"
         spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
         if spec is None or spec.loader is None:
@@ -171,7 +183,8 @@ class PackLoader:
             m = self.manifests.get(mid)
             out.append(dict(st, enabled=self.kernel.modules.enabled(mid, tenant_id) if st["state"] == "loaded" else False,
                             description=m.description if m else "",
-                            routes_prefixes=[m.route_prefix] + list(m.legacy_routes) if m else [],
+                            routes_prefixes=[m.route_prefix] + list(m.legacy_routes) + list(m.route_aliases) if m else [],
+                            report_kinds=sorted(k for k, v in self.kernel.report_kinds.items() if v["module"] == mid),
                             subscribes=list(m.subscribes) if m else [], publishes=list(m.publishes) if m else [],
                             mcp_tools=[t.name for t in m.mcp_tools] if m else [],
                             scopes=list(m.requires_scopes) if m else [],

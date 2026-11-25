@@ -13,6 +13,14 @@ MIGRATIONS = [
         "ALTER TABLE events ADD COLUMN IF NOT EXISTS tenant_id text NOT NULL DEFAULT 'default'",
         "CREATE INDEX IF NOT EXISTS events_tenant_id ON events (tenant_id, id)",
     ]),
+    # Phase 6: `events` becomes the generic module journal (core/data/journal.py). Every row written before this
+    # migration was the question log of the old built-in SOP-feedback feature, now the pack "industrial_field_ops" -
+    # so existing rows get that stream name once (data history only; the Core does not use the pack otherwise).
+    (2, "journal streams on events", [
+        "ALTER TABLE events ADD COLUMN IF NOT EXISTS stream text NOT NULL DEFAULT 'industrial_field_ops.questions'",
+        "ALTER TABLE events ALTER COLUMN stream SET DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS events_tenant_stream ON events (tenant_id, stream, id)",
+    ]),
 ]
 
 TRACKING = ("CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, name text NOT NULL, "

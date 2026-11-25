@@ -118,3 +118,22 @@ class ModuleGate:
                 await send({"type": "http.response.body", "body": body})
                 return
         await self.app(scope, receive, send)
+
+
+class RouteAliases:
+    """ASGI middleware: old URL prefixes a pack took over keep working, e.g. /api/machines/resolve ->
+    /api/v1/packs/<pack>/machines/resolve. The table is {old_prefix: (module_id, new_prefix)} and is filled by the
+    loader. Runs INSIDE ModuleGate's view of the world: the module's switch covers old and new URLs alike."""
+
+    def __init__(self, app, table: dict):
+        self.app, self.table = app, table
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and self.table:
+            path = scope.get("path", "")
+            for old in sorted(self.table, key=len, reverse=True):
+                if path == old or path.startswith(old + "/"):
+                    new = self.table[old][1] + path[len(old):]
+                    scope = dict(scope, path=new, raw_path=new.encode())
+                    break
+        await self.app(scope, receive, send)

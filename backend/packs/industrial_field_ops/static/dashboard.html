@@ -132,6 +132,7 @@
 <div id="zoom"><img alt=""></div>
 
 <script>
+const API = "/api/v1/packs/industrial_field_ops";   // this pack's URLs (old /api/procops/* still work)
 const vfetch = (u, o = {}) => { let t = ''; try { t = localStorage.getItem('vr-admin-token') || ''; } catch {} o.headers = Object.assign({}, o.headers || {}, t ? { 'X-VR-Token': t } : {}); return fetch(u, o); };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -150,7 +151,7 @@ const when = (iso) => iso ? new Date(iso).toLocaleString() : '';
 
 async function load() {
   try {
-    const r = await vfetch('/api/procops/summary', { cache: 'no-store' });
+    const r = await vfetch(API + '/summary', { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     data = await r.json();
   } catch (e) { $('docs').innerHTML = `<div class="empty">Backend not reachable (${esc(e.message)}). Start START_VR_RAG.bat.</div>`; return; }
@@ -219,7 +220,7 @@ function renderDetail() {
   const { d, p } = current();
   if (!d) return;
   lastSig = JSON.stringify(p) + data.indexVersion;
-  const img = `/api/procops/page/${d.uid}/${p.page}?t=${data.indexVersion}`;
+  const img = `${API}/page/${d.uid}/${p.page}?t=${data.indexVersion}`;
   $('detail').innerHTML = `
     <div class="detail-head"><div><h2 style="margin:0">${esc(d.title)} · page ${p.page}</h2>
       <div class="muted small">Document v${d.version}${p.rev ? ` · this page revised in v${p.rev}` : ' · original page'}
@@ -239,7 +240,7 @@ async function makeDraft() {
   const b = $('btn-draft'); b.disabled = true; b.textContent = 'AI is reading the page and the questions...';
   drafting = true;
   try {
-    const r = await vfetch('/api/procops/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sel) });
+    const r = await vfetch(API + '/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sel) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
     draft = j; showDraft();
@@ -269,7 +270,7 @@ async function approve() {
   try { localStorage.setItem('procops-approver', approver); } catch (e) {}
   const b = $('btn-approve'); b.disabled = true; b.textContent = 'Publishing...';
   try {
-    const r = await vfetch('/api/procops/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await vfetch(API + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...sel, text: $('newtext').value, approver, summary: draft.change_summary.join('; ') || draft.issue, evidence: draft.evidence.length }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
@@ -291,7 +292,7 @@ document.addEventListener('click', (e) => {
 $('zoom').onclick = () => ($('zoom').style.display = 'none');
 $('reset').onclick = async () => {
   if (!confirm('Reset the demo? All pages go back to their original version (revisions are archived) and the question log is archived.')) return;
-  await vfetch('/api/procops/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: true }) });
+  await vfetch(API + '/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: true }) });
   sel = null; draft = null; $('detail').innerHTML = '<div class="empty">Demo reset. Ask questions in the glasses app.</div>';
   toast('Demo reset.'); setTimeout(load, 1200);
 };

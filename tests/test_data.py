@@ -198,3 +198,24 @@ def test_pg_kv_and_events_are_per_tenant(pg):
         with use_tenant("acme-test"):
             pg.kv_delete(k, "same-id")
             pg.x("DELETE FROM events WHERE tenant_id = %s", ("acme-test",))
+
+
+def test_pg_journal_streams_are_per_tenant(pg):
+    """Phase 6: module journals live in `events` with a stream name (migration 2)."""
+    from core.data import PgJournal
+    from core.data.tenancy import use_tenant
+    j, s1, s2 = PgJournal(pg), f"test_{uuid.uuid4().hex[:8]}.questions", f"test_{uuid.uuid4().hex[:8]}.other"
+    try:
+        j.append(s1, {"q": "default q"})
+        j.append(s2, {"q": "other stream"})
+        with use_tenant("acme-test"):
+            j.append(s1, {"q": "acme q"})
+            assert [e["q"] for e in j.list(s1)] == ["acme q"]
+            j.archive(s1)
+            assert j.list(s1) == []
+        assert [e["q"] for e in j.list(s1)] == ["default q"]                   # acme's archive did not touch it
+        assert [e["q"] for e in j.list(s2)] == ["other stream"]                 # streams are separate
+        with pytest.raises(ValueError):
+            j.append("no-dot", {})
+    finally:
+        pg.x("DELETE FROM events WHERE stream IN (%s, %s)", (s1, s2))

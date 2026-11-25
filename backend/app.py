@@ -11,7 +11,7 @@ What it does
   6. /upload      : web page to upload PDF / DOCX / TXT; files are stored + indexed in backend/data/
      /api/files   : list (GET), upload (POST), delete (DELETE /api/files/<uid>)
      /rag/index.json, /rag/pages/... : served from the document store, so the VR app always sees the uploads
-  7. /procops     : ProcOps dashboard - question heatmap per page, AI-drafted fix, approve -> new version (procops.py)
+  7. /procops     : ProcOps dashboard - now the Industrial Field Ops pack (backend/packs/industrial_field_ops)
   8. /api/vision/* : photo + question ("scan, then ask") via a Groq vision model (vision.py)
 
 Embeddings
@@ -82,17 +82,17 @@ async def _policy_denied(_req, e: PolicyDenied):
 # ---------------------------------------------------------------- shared services (built once, in this order)
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
-from core.data import DB, LocalKV, database_url
+from core.data import DB, LocalJournal, LocalKV, PgJournal, database_url
 from auth import Auth
 from core.identity import ApiKeys, Identity, TenantContext, Tenants
 from core.config import ConfigStore
-from core.modules import Module, ModuleGate, ModuleRegistry
+from core.modules import ModuleGate, ModuleRegistry, RouteAliases
 from core.observability import AuditLog
 from core.plugins import EventBus, Kernel, PackLoader
 from core.ai.prompts import PromptRegistry
 from core.sdk.events import Event
 from core.identity.keys import allow_pack_scopes
-from core.data.tenancy import current_tenant, doc_tenant
+from core.data.tenancy import current_tenant, doc_tenant, use_tenant
 
 
 def _make_db(c):
@@ -111,6 +111,7 @@ SERVICES = Container()
 SERVICES.register("db", _make_db)
 SERVICES.register("store", lambda c: Store(SETTINGS.data_dir, seed_dir=SETTINGS.seed_dir, db=c.get("db")))
 SERVICES.register("kv", lambda c: c.get("db") or LocalKV(SETTINGS.data_dir))   # reminders, pins, sessions...
+SERVICES.register("journal", lambda c: PgJournal(c.get("db")) if c.get("db") else LocalJournal(SETTINGS.data_dir))
 SERVICES.register("auth", lambda c: Auth(c.get("kv")))
 SERVICES.register("tenants", lambda c: Tenants(c.get("kv")))
 SERVICES.register("keys", lambda c: ApiKeys(c.get("kv"), c.get("tenants")))
@@ -134,10 +135,8 @@ CONFIG.declare("ai.chat_model", "string", "", "Chat model for this scope; empty 
 CONFIG.declare("search.low_confidence", "number", 0.62, "Best semantic match below this = low confidence",
                min=0.0, max=1.0)
 CONFIG.declare("limits.ai_daily", "integer", 0, "AI provider calls per tenant per UTC day; 0 = no limit", min=0)
-# capabilities and packs register themselves from their manifest.json (core/plugins, Phase 5) - see the loader below.
-# Industrial Field Ops still lives in app.py/procops.py until Phase 6 moves it into packs/industrial_field_ops.
-MODULES.add(Module("industrial_field_ops", "Industrial Field Ops", "pack", ("/api/procops", "/procops", "/api/machines"),
-                   "SOP question heatmap + AI redline (ProcOps), machine tags"))
+# capabilities and packs register themselves from their manifest.json (core/plugins) - see the loader below.
+ALIASES = {}                                              # old URL prefix -> pack URL (filled by the loader)
 BUS = EventBus(enabled=MODULES.enabled, log=log)          # in-process events: Core -> modules (core/plugins)
 PROMPTS = PromptRegistry(CONFIG)                          # every system prompt, by id (core/ai/prompts)
 
@@ -151,11 +150,12 @@ def emit(name, data, tenant_id=None, source="core"):
 
 
 # order matters: the LAST middleware added runs FIRST. TenantContext must set the tenant before ModuleGate checks it.
+app.add_middleware(RouteAliases, table=ALIASES)         # old URLs of packs keep working (Phase 6)
 app.add_middleware(ModuleGate, registry=MODULES)        # 404 for modules switched off for this tenant (Phase 4)
 app.add_middleware(TenantContext, identity=IDENTITY)   # sets the request's tenant for the data layer (Phase 4)
 keep_cors_outermost(app)                                 # CORS stays the outer layer
 # ---------------------------------------------------------------- search -> core/knowledge
-from core.knowledge import LOW_CONFIDENCE, SearchEngine, norm_code
+from core.knowledge import LOW_CONFIDENCE, SearchEngine, norm_code  # noqa: F401  (old name, still importable)
 from core.knowledge.search import RRF_K, W_KEYWORD, W_SEMANTIC  # noqa: F401  (old names, still importable)
 
 SEARCH = SearchEngine(STORE, tokenize=tokenize, can_see=AUTH.can_see_doc, embed_model=EMBED_MODEL, db=DBX,
@@ -261,37 +261,6 @@ def files_patch(uid: str, req: Request, _body=JSONB):
 
 
 # ---------------------------------------------------------------- Visual-to-RAG: machine ids from QR / barcodes / serials
-@app.get("/api/machines")
-def machines(req: Request):
-    snap, user = STORE.snapshot, AUTH.user_of(req)
-    out = {}
-    for d in snap["index"]["docs"]:
-        if AUTH.can_see_doc(d, user):
-            for t in d.get("tags", []):
-                out.setdefault(t, []).append({"uid": d["uid"], "title": d["title"], "id": d["id"]})
-    return {"machines": [{"machine_id": k, "docs": v} for k, v in sorted(out.items())]}
-
-
-@app.post("/api/machines/resolve")
-def machines_resolve(req: Request, _body=JSONB):
-    """Text from a QR code / barcode / label photo -> the machine id it belongs to (or none)."""
-    b = (_body if _body is not None else {})
-    text = str(b.get("text", ""))[:2000]
-    snap, user = STORE.snapshot, AUTH.user_of(req)
-    tags = {t for d in snap["index"]["docs"] if AUTH.can_see_doc(d, user) for t in d.get("tags", [])}
-    nt = norm_code(text)
-    words = {norm_code(w) for w in re.split(r"[\s,;:/|]+", text) if len(norm_code(w)) >= 3}
-    best = None
-    for t in sorted(tags, key=lambda t: -len(norm_code(t))):
-        n = norm_code(t)
-        if n and (n in words or (len(n) >= 4 and n in nt)):
-            best = t
-            break
-    docs = [{"uid": d["uid"], "title": d["title"], "id": d["id"]} for d in snap["index"]["docs"]
-            if best in d.get("tags", []) and AUTH.can_see_doc(d, user)] if best else []
-    return {"machine_id": best, "docs": docs, "text": text[:200]}
-
-
 @app.get("/api/index/version")
 def index_version():
     snap = STORE.snapshot
@@ -533,12 +502,6 @@ async def stt(req: Request):
     return r.json()
 
 
-# ---------------------------------------------------------------- ProcOps (question log, heatmap, AI redline, versions)
-try:
-    import procops
-    procops.register(app, STORE, llm_complete, ROOT, AUTH)
-except Exception as _e:  # ProcOps must never stop the main app from starting
-    print(f"[procops] disabled: {_e}", flush=True)
 
 
 def _register(name, fn):
@@ -552,17 +515,50 @@ def _register(name, fn):
 
 import mcp_server
 
+def _import_old_question_log(journal):
+    """Local mode only, once: question logs written by the built-in ProcOps before Phase 6
+    (<data dir>/procops/events[.<tenant>].jsonl) move into the pack's journal. Postgres rows are renamed by
+    migration 2. The old files are kept as *.imported."""
+    if not isinstance(journal, LocalJournal):
+        return
+    for f in sorted((DATA_DIR / "procops").glob("events*.jsonl")):
+        parts = f.name.split(".")                         # events.jsonl | events.<tenant>.jsonl
+        tenant = parts[1] if len(parts) == 3 else "default"
+        try:
+            with use_tenant(tenant):
+                for line in f.read_text("utf-8").splitlines():
+                    try:
+                        journal.append("industrial_field_ops.questions", json.loads(line))
+                    except ValueError:
+                        pass
+            f.replace(f.with_name(f.name + ".imported"))
+            print(f"[procops] moved {f.name} into the Industrial Field Ops pack", flush=True)
+        except Exception as e:
+            print(f"[procops] could not move {f.name}: {e}", flush=True)
+
+
 # ---------------------------------------------------------------- capabilities + packs (Phase 5): manifest + register(ctx)
 KERNEL = Kernel(identity=IDENTITY, modules=MODULES, config=CONFIG, prompts=PROMPTS, ai=AI, bus=BUS, kv=KV,
                 search=lambda q, k, tag, user: SEARCH.search(q, k, tag=tag, user=user),
-                page_url=lambda uid, page: f"/api/v1/documents/{uid}/pages/{page}.jpg")
+                page_url=lambda uid, page: f"/api/v1/documents/{uid}/pages/{page}.jpg",
+                store=STORE, can_see=AUTH.can_see_doc, journal=SERVICES.get("journal"), emit=emit, aliases=ALIASES)
+
+
+def _report_kinds():
+    """Report templates of the modules that are ON for this tenant (used by the Work sessions capability)."""
+    return {k: v for k, v in KERNEL.report_kinds.items() if MODULES.enabled(v["module"])}
+
+
+_import_old_question_log(SERVICES.get("journal"))
 _PACK_DIRS = [BACKEND_DIR / "capabilities", BACKEND_DIR / "packs"] + \
     [Path(p) for p in os.environ.get("VR_RAG_PACK_DIRS", "").split(os.pathsep) if p.strip()]
-LOADER = PackLoader(app, KERNEL, _PACK_DIRS, allow_scopes=allow_pack_scopes, legacy_services={
+LOADER = PackLoader(app, KERNEL, _PACK_DIRS, allow_scopes=allow_pack_scopes,
+                    skip=[x.strip() for x in os.environ.get("VR_RAG_SKIP_MODULES", "").split(",") if x.strip()],
+                    legacy_services={
     # old-style dependencies for capabilities not yet moved to the SDK (manifest "legacy": true) - ADR 0006
     "app": app, "kv": KV, "auth": AUTH, "store": STORE, "root": ROOT, "llm_complete": llm_complete,
     "run_search": run_search, "provider": provider, "get_key": get_key, "list_models": list_models,
-    "spend": AI.spend})
+    "spend": AI.spend, "report_kinds": _report_kinds, "emit": emit})
 LOADER.load_all()
 
 

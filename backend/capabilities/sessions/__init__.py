@@ -7,4 +7,5 @@ NO_CONNECTORS = {"send": None, "get": lambda c: None}
 def register(ctx):
     L = ctx.legacy
     return workflows.register(L.app, L.kv, L.llm_complete, L.run_search, L.store,
-                              L.export("connectors") or NO_CONNECTORS, L.root, L.auth)
+                              L.export("connectors") or NO_CONNECTORS, L.root, L.auth,
+                              kinds=L.report_kinds, emit=L.emit)

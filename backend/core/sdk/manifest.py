@@ -70,6 +70,9 @@ class Manifest(BaseModel):
                                   description="load after these modules IF they exist (soft order, not a dependency)")
     legacy: bool = Field(False, description="capability still uses the old register(app, ...) code through "
                                             "ctx.legacy while it is being moved to the SDK (capabilities only)")
+    route_aliases: dict[str, str] = Field(default_factory=dict,
+                                          description="old URL prefix -> path under /api/v1/packs/<id>, so existing "
+                                                      "clients keep working, e.g. {'/api/machines': '/machines'} (SDK 1.2)")
     legacy_routes: list[str] = Field(default_factory=list,
                                      description="old URL prefixes this capability owns, e.g. '/api/notes' - "
                                                  "switched off together with the module")
@@ -125,6 +128,13 @@ class Manifest(BaseModel):
             raise ValueError("a module cannot depend on itself")
         if (self.legacy or self.legacy_routes) and self.kind != "capability":
             raise ValueError("only capabilities may use legacy code or legacy routes; a pack uses the SDK only")
+        for old, new in self.route_aliases.items():
+            if not LEGACY_ROUTE.match(old):
+                raise ValueError(f"bad alias {old!r}: like '/api/machines' (no trailing '/')")
+            if new and not LEGACY_ROUTE.match(new):
+                raise ValueError(f"bad alias target {new!r}: like '/machines', or '' for the pack root")
+            if any(old == c or old.startswith(c + "/") or c.startswith(old + "/") for c in RESERVED_ROUTES):
+                raise ValueError(f"alias {old!r} overlaps a Core route")
         for r in self.legacy_routes:
             if not LEGACY_ROUTE.match(r):
                 raise ValueError(f"bad legacy route {r!r}: like '/api/notes' (no trailing '/')")
