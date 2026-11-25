@@ -70,7 +70,7 @@ def on_startup():
 # ---------------------------------------------------------------- shared services (built once, in this order)
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
-from db import DB, LocalKV, database_url
+from core.data import DB, LocalKV, database_url
 from auth import Auth
 
 
