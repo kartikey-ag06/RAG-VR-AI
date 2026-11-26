@@ -28,11 +28,14 @@ Auth (same rules as the rest of the app)
   - Authorization: Bearer <MCP_TOKEN>  -> service access (cloud assistants), public documents only
   - Authorization: Bearer vrk_...      -> an API key: its tenant and scopes (core/identity), public documents only
 """
+import base64
+import hashlib
 import json
 import os
 import re
 import secrets
 import threading
+import uuid
 from collections import OrderedDict
 from io import BytesIO
 
@@ -45,8 +48,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from core.data.tenancy import current_tenant, doc_tenant
 from core.sdk.context import BudgetExceeded, PolicyDenied
-
+from frame_gate import evaluate_frame
 from net import JSONB
+from session_state import build_context_hint, entity_state_dict, get_session, upsert_session
 
 API = "/api/v1"
 STYLES = ("full", "glance", "spoken")
@@ -410,6 +414,12 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    def _scan_identity_key(req: Request) -> str:
+        raw = (req.headers.get("x-vr-token") or req.headers.get("authorization")
+               or req.query_params.get("token") or "").strip()
+        tok = hashlib.sha256(raw.encode()).hexdigest()[:16] if raw else "anon"
+        return f"{current_tenant()}:{tok}"
+
     @app.post(f"{API}/scan")
     def v1_scan(req: Request, _body=JSONB):
         ok, user = caller(req, scope="ai:vision")
@@ -424,16 +434,107 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         bad = vision["check"](image)
         if bad:
             return JSONResponse({"error": bad}, 400)
-        q = question_of(b) or "What is this, and what do my documents say about it?"
+        session_id = str(b.get("session_id") or "").strip()[:64] or uuid.uuid4().hex[:12]
+        gate = True if b.get("gate") is None else bool(b.get("gate"))
+        raw_q = str(b.get("question") or b.get("query") or "").strip()[:MAX_Q]
+        q = raw_q or "What is this, and what do my documents say about it?"
         style, lang = opts(b)
+        identity_key = _scan_identity_key(req)
+        sess = get_session(identity_key, session_id)
+
+        gate_res = None
+        metrics = None
+        if gate:
+            try:
+                img_bytes = base64.b64decode(image.split(",", 1)[1], validate=True)
+                gate_res = evaluate_frame(img_bytes, last_dhash=sess.last_dhash if sess else None)
+                metrics = gate_res.to_dict()
+            except Exception:
+                return JSONResponse({"error": "could not decode image"}, 400)
+
+            if gate_res.is_blurry:
+                return {
+                    "status": "skipped_blur",
+                    "cached": False,
+                    "answer": "Frame is blurry — hold steady and try again.",
+                    "mode": "gate",
+                    "citations": [],
+                    "confidence": None,
+                    "photo": {},
+                    "session_id": session_id,
+                    "gate_metrics": metrics,
+                    "entity_state": entity_state_dict(sess),
+                }
+
+            if gate_res.is_duplicate and sess is not None and sess.last_vision_summary is not None:
+                same_q = (not raw_q) or (raw_q.lower() == (sess.last_question or "").lower())
+                if same_q:
+                    return {
+                        "status": "skipped_duplicate",
+                        "cached": True,
+                        "answer": sess.last_answer,
+                        "mode": sess.last_mode,
+                        "citations": sess.last_citations,
+                        "confidence": sess.last_confidence,
+                        "photo": {k: sess.last_vision_summary.get(k, "") for k in ("object", "details", "text_seen")},
+                        "session_id": session_id,
+                        "gate_metrics": metrics,
+                        "entity_state": entity_state_dict(sess),
+                    }
+                rag_photo = dict(sess.last_vision_summary)
+                ctx_hint = build_context_hint(sess)
+                if ctx_hint:
+                    rag_photo["details"] = (rag_photo.get("details") or "") + f" ({ctx_hint})"
+                out = answer(q, b.get("machine_id"), style, lang, user, photo=rag_photo, door="scan")
+                sess = upsert_session(
+                    identity_key, session_id,
+                    question=raw_q,
+                    answer=out.get("answer", ""),
+                    mode=out.get("mode", ""),
+                    confidence=out.get("confidence"),
+                    citations=out.get("citations", []),
+                )
+                out.update(
+                    status="reused_scene",
+                    cached=False,
+                    session_id=session_id,
+                    gate_metrics=metrics,
+                    entity_state=entity_state_dict(sess),
+                    photo={k: sess.last_vision_summary.get(k, "") for k in ("object", "details", "text_seen")},
+                )
+                return out
+
         try:
             photo = vision["describe"](image, b.get("hint", ""))
         except BudgetExceeded as e:
             return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, 502)
-        out = answer(q, b.get("machine_id"), style, lang, user, photo=photo, door="scan")
-        out["photo"] = {k: photo.get(k, "") for k in ("object", "details", "text_seen")}
+
+        rag_photo = dict(photo)
+        ctx_hint = build_context_hint(sess) if sess and sess.turn_count > 0 else ""
+        if ctx_hint:
+            rag_photo["details"] = (rag_photo.get("details") or "") + f" ({ctx_hint})"
+        out = answer(q, b.get("machine_id"), style, lang, user, photo=rag_photo, door="scan")
+        sess = upsert_session(
+            identity_key, session_id,
+            last_dhash=gate_res.dhash if gate_res else None,
+            last_vision_summary=photo,
+            active_entity=str(photo.get("object") or "")[:80],
+            question=raw_q,
+            answer=out.get("answer", ""),
+            mode=out.get("mode", ""),
+            confidence=out.get("confidence"),
+            citations=out.get("citations", []),
+        )
+        out.update(
+            status="ok",
+            cached=False,
+            session_id=session_id,
+            gate_metrics=metrics,
+            entity_state=entity_state_dict(sess),
+            photo={k: photo.get(k, "") for k in ("object", "details", "text_seen")},
+        )
         return out
 
     @app.get(API + "/documents/{uid}/pages/{page}")
