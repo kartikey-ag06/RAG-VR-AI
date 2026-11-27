@@ -6,12 +6,16 @@ Mounted at /api/v1/packs/warehouse_qc/...
 import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Body, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from core.sdk import PolicyDenied
+
+DASHBOARD = Path(__file__).parent / "static" / "dashboard.html"
+NO_CACHE = {"Cache-Control": "no-store"}
 
 QUARANTINE_SCOPE = "warehouse_qc:quarantine"
 LOTS_KIND = "lots"
@@ -101,6 +105,10 @@ def register(ctx):
         }
 
     # ------------------------------------------------------------ REST routes (/api/v1/packs/warehouse_qc/...)
+    @ctx.router.get("/dashboard")
+    def dashboard():
+        return FileResponse(DASHBOARD, headers=NO_CACHE)
+
     @ctx.router.get("/lots")
     def list_lots(request: Request):
         ctx.require(request, "knowledge:read")

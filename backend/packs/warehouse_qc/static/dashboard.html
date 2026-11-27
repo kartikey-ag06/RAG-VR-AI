@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warehouse QC Supervisor · Lot Quarantine &amp; Agent Approvals</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --warn:#e0a63a; --bad:#e5596b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:16px; }
+  h1 { font-size: 22px; margin: 0; } h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin: 2px 0 0; }
+  .authbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .badge { font-size:12px; padding:3px 10px; border-radius:999px; background:#16203a; border:1px solid var(--line); color:var(--muted); display:inline-block; }
+  .badge.ok { background:#14351f; border-color:var(--ok); color:#bdf0d2; }
+  .badge.warn { background:#3a2d10; border-color:var(--warn); color:#ffe0a3; }
+  .badge.bad { background:#3b1219; border-color:var(--bad); color:#ffd9de; }
+  input[type=text], input[type=password], select {
+    padding:7px 10px; border-radius:8px; border:1px solid var(--line); background:#0d1220; color:var(--text); font:inherit; font-size:13px;
+  }
+  button { display:inline-block; border:1px solid var(--line); background:#1a2540; color:var(--text);
+    padding:7px 13px; border-radius:8px; cursor:pointer; font:inherit; font-size:13px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color:#06101f; font-weight:600; }
+  button.go { background: var(--ok); border-color: var(--ok); color:#04150b; font-weight:600; }
+  button.danger { background: var(--bad); border-color: var(--bad); color:#fff; font-weight:600; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .banner { background:#3b1219; border:1px solid var(--bad); color:#ffd9de; border-radius:10px; padding:12px 16px; margin-bottom:16px; display:none; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 16px; min-width:170px; }
+  .stat b { display:block; font-size:24px; } .stat span { color:var(--muted); font-size:12px; }
+  .grid { display:grid; grid-template-columns: 1.25fr 1fr; gap:18px; align-items:start; }
+  @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:18px; }
+  h2 { font-size:15px; margin:0 0 10px; display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  h2 small { color:var(--muted); font-weight:400; font-size:12px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .row input[type=text] { flex:1 1 240px; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { text-align:left; padding:8px 8px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:middle; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  tr:last-child td { border-bottom:none; }
+  .approval-card { background:#2b1f0d; border:1px solid var(--warn); border-radius:10px; padding:12px 14px; margin-top:10px; }
+  .approval-card pre { background:#0d1220; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12px; overflow:auto; margin:8px 0; }
+  .answer { white-space:pre-wrap; background:#0d1220; border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:10px; font-size:13.5px; }
+  .cites { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .cite-btn { background:#16203a; border:1px solid var(--line); border-radius:8px; padding:5px 10px; font-size:12px; color:var(--accent); }
+  .preview { margin-top:12px; display:none; }
+  .preview img { max-width:100%; border-radius:8px; border:1px solid var(--line); background:#fff; }
+  .topic { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .topic:last-child { border-bottom:none; }
+  .empty { color:var(--muted); font-size:13px; padding:10px 0; }
+  #toast { position:fixed; bottom:20px; right:20px; background:#14351f; color:#d7f5e3; border:1px solid var(--ok);
+    padding:10px 16px; border-radius:10px; display:none; max-width:440px; z-index:20; }
+  #toast.err { background:#3b1219; border-color:var(--bad); color:#ffd9de; }
+</style>
+<link rel="stylesheet" href="/theme/vr-theme.css">
+<script src="/theme/vr-shell.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1><span>Warehouse QC</span> · Supervisor Dashboard</h1>
+      <div class="sub">Lot quarantine controls, recurring QC telemetry, and Phase 12 human-approved agent actions.</div>
+    </div>
+    <div class="authbar">
+      <span id="auth-badge" class="badge">Checking token...</span>
+      <input id="token-input" type="password" placeholder="Paste vrk_... or user token" aria-label="Access token">
+      <button id="save-token" class="primary">Set Token</button>
+      <button id="clear-token">Logout</button>
+    </div>
+  </header>
+
+  <div id="disabled-banner" class="banner"></div>
+
+  <div class="stats">
+    <div class="stat"><b id="s-quarantined">-</b><span>quarantined lots</span></div>
+    <div class="stat"><b id="s-total-q">-</b><span>QC telemetry questions</span></div>
+    <div class="stat"><b id="s-status">-</b><span>pack status</span></div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <section class="card">
+        <h2>Lots &amp; Quarantine Status <small>GET /api/v1/packs/warehouse_qc/lots</small></h2>
+        <div id="lots-box"><div class="empty">Loading lots...</div></div>
+      </section>
+
+      <section class="card">
+        <h2>Top Recurring QC Questions <small>from question.asked telemetry</small></h2>
+        <div id="qc-questions"><div class="empty">Loading telemetry...</div></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="card">
+        <h2>QC Agent &amp; Human Approval <small>POST /api/v1/agent/run</small></h2>
+        <div class="row">
+          <input id="agent-input" type="text" placeholder="e.g. Quarantine LOT-42 due to broken seal">
+          <button id="agent-sample" title="Fill sample quarantine command">Sample</button>
+          <button id="agent-btn" class="primary">Run Agent</button>
+        </div>
+        <div id="approval-box"></div>
+        <div id="agent-out" class="empty">Write tools pause here for supervisor approval before mutating lot state.</div>
+      </section>
+
+      <section class="card">
+        <h2>Cited Warehouse SOP Q&amp;A <small>POST /api/v1/ask</small></h2>
+        <div class="row">
+          <input id="ask-input" type="text" placeholder="Ask a warehouse SOP or inspection question...">
+          <select id="ask-style" aria-label="Answer style">
+            <option value="full">full</option>
+            <option value="glance">glance</option>
+          </select>
+          <button id="ask-btn" class="primary">Ask</button>
+        </div>
+        <div id="ask-answer" class="answer" hidden></div>
+        <div id="ask-cites" class="cites"></div>
+        <div id="ask-preview" class="preview">
+          <div class="sub" id="preview-caption" style="margin-bottom:6px;"></div>
+          <img id="preview-img" alt="Cited warehouse SOP page">
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+'use strict';
+const TOKEN_KEY = 'vr-user-token';
+const params = new URLSearchParams(location.search);
+try {
+  if (params.get('token')) {
+    localStorage.setItem(TOKEN_KEY, params.get('token'));
+    params.delete('token');
+    const qs = params.toString();
+    history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+  }
+} catch (e) {}
+
+function getToken() {
+  try { return (localStorage.getItem(TOKEN_KEY) || '').trim(); } catch (e) { return ''; }
+}
+function setToken(v) {
+  try {
+    if (v) localStorage.setItem(TOKEN_KEY, v.trim());
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (e) {}
+  updateAuthBadge();
+}
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const tok = getToken();
+  if (tok) {
+    if (tok.startsWith('vrk_')) h['Authorization'] = 'Bearer ' + tok;
+    else h['X-VR-Token'] = tok;
+  }
+  return h;
+}
+function updateAuthBadge() {
+  const tok = getToken();
+  const el = document.getElementById('auth-badge');
+  if (!tok) { el.textContent = 'No token set'; el.className = 'badge warn'; return; }
+  el.textContent = tok.startsWith('vrk_') ? 'API Key (Bearer vrk_...)' : 'User Token (X-VR-Token)';
+  el.className = 'badge ok';
+}
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = isErr ? 'err' : '';
+  t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.display = 'none'; }, 4000);
+}
+async function api(path, opts) {
+  const o = Object.assign({}, opts || {});
+  o.headers = authHeaders(o.headers);
+  const r = await fetch(path, o);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.detail || data.error || ('HTTP ' + r.status));
+    err.status = r.status;
+    throw err;
+  }
+  return data;
+}
+
+let activeBlob = null;
+async function previewCitation(c) {
+  const box = document.getElementById('ask-preview');
+  const img = document.getElementById('preview-img');
+  const cap = document.getElementById('preview-caption');
+  if (activeBlob) { URL.revokeObjectURL(activeBlob); activeBlob = null; }
+  try {
+    const r = await fetch(`/api/v1/documents/${encodeURIComponent(c.doc_uid)}/pages/${c.page}.jpg?w=600`, { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    activeBlob = URL.createObjectURL(blob);
+    img.src = activeBlob;
+    cap.textContent = `${c.title} — Page ${c.page}`;
+    box.style.display = 'block';
+  } catch (e) {
+    toast('Could not load page preview: ' + e.message, true);
+  }
+}
+
+async function refreshAll() {
+  const banner = document.getElementById('disabled-banner');
+  banner.style.display = 'none';
+  try {
+    const [sum, lotsRes] = await Promise.all([
+      api('/api/v1/packs/warehouse_qc/summary'),
+      api('/api/v1/packs/warehouse_qc/lots'),
+    ]);
+    document.getElementById('s-quarantined').textContent = String(sum.quarantined_count ?? 0);
+    document.getElementById('s-total-q').textContent = String(sum.total_questions ?? 0);
+    document.getElementById('s-status').textContent = 'Enabled';
+
+    const qBox = document.getElementById('qc-questions');
+    qBox.innerHTML = '';
+    const topQ = sum.top_questions || [];
+    if (!topQ.length) {
+      qBox.innerHTML = '<div class="empty">No recurring QC questions recorded yet.</div>';
+    } else {
+      for (const q of topQ) {
+        const row = document.createElement('div');
+        row.className = 'topic';
+        const txt = document.createElement('span');
+        txt.textContent = q.question;
+        const cnt = document.createElement('span');
+        cnt.className = 'badge';
+        cnt.textContent = String(q.count || 0);
+        row.append(txt, cnt);
+        qBox.appendChild(row);
+      }
+    }
+
+    const lots = lotsRes.lots || [];
+    const lotsBox = document.getElementById('lots-box');
+    lotsBox.innerHTML = '';
+    if (!lots.length) {
+      lotsBox.innerHTML = '<div class="empty">No lots tracked yet. Use the QC Agent panel to quarantine a lot.</div>';
+      return;
+    }
+    const tbl = document.createElement('table');
+    tbl.innerHTML = '<thead><tr><th>Lot</th><th>Status</th><th>Reason / Severity</th><th>Actor</th><th>Action</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    for (const lot of lots) {
+      const tr = document.createElement('tr');
+      const tdId = document.createElement('td');
+      tdId.textContent = lot.lot_id || '';
+      const tdSt = document.createElement('td');
+      const stBadge = document.createElement('span');
+      const isQ = lot.status === 'quarantined';
+      stBadge.className = 'badge ' + (isQ ? 'bad' : 'ok');
+      stBadge.textContent = lot.status || 'active';
+      tdSt.appendChild(stBadge);
+      const tdReason = document.createElement('td');
+      tdReason.textContent = (lot.reason || '-') + (lot.severity ? ` (${lot.severity})` : '');
+      const tdActor = document.createElement('td');
+      const ts = lot.updated_at ? new Date(lot.updated_at * 1000).toLocaleTimeString() : '';
+      tdActor.textContent = `${lot.actor || '-'} ${ts ? '· ' + ts : ''}`;
+      const tdAct = document.createElement('td');
+      if (isQ) {
+        const btn = document.createElement('button');
+        btn.className = 'go';
+        btn.textContent = 'Release Lot';
+        btn.onclick = () => releaseLot(lot.lot_id);
+        tdAct.appendChild(btn);
+      } else {
+        tdAct.textContent = '—';
+      }
+      tr.append(tdId, tdSt, tdReason, tdActor, tdAct);
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    lotsBox.appendChild(tbl);
+  } catch (e) {
+    if (e.status === 404 || e.status === 403) {
+      document.getElementById('s-status').textContent = e.status === 404 ? 'Disabled' : 'Restricted';
+      banner.textContent = e.status === 404
+        ? 'Pack disabled for this tenant (warehouse_qc is turned off).'
+        : 'Access denied: provide a token with knowledge:read scope.';
+      banner.style.display = 'block';
+    } else {
+      toast('Load error: ' + e.message, true);
+    }
+  }
+}
+
+async function releaseLot(lotId) {
+  try {
+    await api(`/api/v1/packs/warehouse_qc/lots/${encodeURIComponent(lotId)}/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: 'Released from Warehouse QC Supervisor dashboard' }),
+    });
+    toast(`Lot ${lotId} released to active`);
+    refreshAll();
+  } catch (e) {
+    if (e.status === 403) {
+      toast('Missing scope warehouse_qc:quarantine — cannot release lot.', true);
+    } else {
+      toast('Release failed: ' + e.message, true);
+    }
+  }
+}
+
+function renderApproval(res) {
+  const box = document.getElementById('approval-box');
+  box.innerHTML = '';
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+  const title = document.createElement('div');
+  title.innerHTML = '<strong>Pending Supervisor Approval</strong>';
+  const meta = document.createElement('div');
+  meta.className = 'sub';
+  meta.textContent = `Approval ID: ${res.approval_id} · Tool: ${res.tool}`;
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(res.args || {}, null, 2);
+  const actions = document.createElement('div');
+  actions.className = 'row';
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'go';
+  approveBtn.textContent = 'Approve';
+  approveBtn.onclick = () => resolveApproval(res.approval_id, 'approve');
+  const rejectBtn = document.createElement('button');
+  rejectBtn.className = 'danger';
+  rejectBtn.textContent = 'Reject';
+  rejectBtn.onclick = () => resolveApproval(res.approval_id, 'reject');
+  actions.append(approveBtn, rejectBtn);
+  card.append(title, meta, pre, actions);
+  box.appendChild(card);
+}
+
+async function resolveApproval(approvalId, action) {
+  const out = document.getElementById('agent-out');
+  try {
+    const res = await api(`/api/v1/agent/approvals/${encodeURIComponent(approvalId)}/${action}`, { method: 'POST' });
+    document.getElementById('approval-box').innerHTML = '';
+    out.className = 'answer';
+    out.textContent = `[${res.status}] ${res.answer || (action === 'reject' ? 'Action rejected.' : 'Approved.')}`;
+    toast(action === 'approve' ? 'Action approved and executed' : 'Action rejected');
+    refreshAll();
+  } catch (e) {
+    toast(`Approval ${action} failed: ${e.message}`, true);
+  }
+}
+
+document.getElementById('save-token').onclick = () => {
+  setToken(document.getElementById('token-input').value);
+  document.getElementById('token-input').value = '';
+  refreshAll();
+};
+document.getElementById('clear-token').onclick = () => { setToken(''); refreshAll(); };
+document.getElementById('agent-sample').onclick = () => {
+  document.getElementById('agent-input').value = 'Quarantine LOT-42 due to broken seal';
+};
+
+document.getElementById('agent-btn').onclick = async () => {
+  const q = document.getElementById('agent-input').value.trim();
+  if (!q) return toast('Enter a command for the QC agent', true);
+  const out = document.getElementById('agent-out');
+  document.getElementById('approval-box').innerHTML = '';
+  out.className = 'empty';
+  out.textContent = 'Running QC agent...';
+  try {
+    const res = await api('/api/v1/agent/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, max_steps: 5 }),
+    });
+    if (res.status === 'awaiting_approval') {
+      out.textContent = 'Paused awaiting supervisor approval.';
+      renderApproval(res);
+    } else {
+      out.className = 'answer';
+      out.textContent = `[${res.status}] ${res.answer || ''}`;
+      refreshAll();
+    }
+  } catch (e) {
+    out.textContent = 'Agent error: ' + e.message;
+  }
+};
+
+document.getElementById('ask-btn').onclick = async () => {
+  const q = document.getElementById('ask-input').value.trim();
+  const style = document.getElementById('ask-style').value;
+  if (!q) return toast('Enter a question first', true);
+  const ansEl = document.getElementById('ask-answer');
+  const citesEl = document.getElementById('ask-cites');
+  ansEl.hidden = false;
+  ansEl.textContent = 'Searching warehouse SOPs...';
+  citesEl.innerHTML = '';
+  try {
+    const res = await api('/api/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, style }),
+    });
+    ansEl.textContent = `${res.answer}\n\n[mode: ${res.mode || 'unknown'}]`;
+    for (const c of (res.citations || [])) {
+      const btn = document.createElement('button');
+      btn.className = 'cite-btn';
+      btn.textContent = `[${c.n}] ${c.title} p.${c.page}`;
+      btn.onclick = () => previewCitation(c);
+      citesEl.appendChild(btn);
+    }
+    refreshAll();
+  } catch (e) {
+    ansEl.textContent = 'Error: ' + e.message;
+  }
+};
+
+updateAuthBadge();
+refreshAll();
+</script>
+</body>
+</html>

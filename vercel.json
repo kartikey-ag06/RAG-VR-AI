@@ -20,6 +20,14 @@
       "destination": "https://vr-rag-backend.onrender.com/procops"
     },
     {
+      "source": "/healthcare",
+      "destination": "https://vr-rag-backend.onrender.com/healthcare"
+    },
+    {
+      "source": "/warehouse",
+      "destination": "https://vr-rag-backend.onrender.com/warehouse"
+    },
+    {
       "source": "/rag/:path*",
       "destination": "https://vr-rag-backend.onrender.com/rag/:path*"
     },

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Healthcare SOP Console · Clinical Procedures</title>
+<style>
+  :root { --bg:#0b0f19; --card:#121a2b; --line:#26324d; --text:#e8ecf4; --muted:#8a95ab; --accent:#5aa9ff; --ok:#3fb97a; --warn:#e0a63a; --bad:#e5596b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", Arial, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:16px; }
+  h1 { font-size: 22px; margin: 0; } h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin: 2px 0 0; }
+  .authbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .badge { font-size:12px; padding:4px 10px; border-radius:999px; background:#16203a; border:1px solid var(--line); color:var(--muted); }
+  .badge.ok { background:#14351f; border-color:var(--ok); color:#bdf0d2; }
+  .badge.warn { background:#3a2d10; border-color:var(--warn); color:#ffe0a3; }
+  input[type=text], input[type=password], select {
+    padding:7px 10px; border-radius:8px; border:1px solid var(--line); background:#0d1220; color:var(--text); font:inherit; font-size:13px;
+  }
+  button { display:inline-block; border:1px solid var(--line); background:#1a2540; color:var(--text);
+    padding:7px 13px; border-radius:8px; cursor:pointer; font:inherit; font-size:13px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color:#06101f; font-weight:600; }
+  button.go { background: var(--ok); border-color: var(--ok); color:#04150b; font-weight:600; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .banner { background:#3b1219; border:1px solid var(--bad); color:#ffd9de; border-radius:10px; padding:12px 16px; margin-bottom:16px; display:none; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 16px; min-width:160px; }
+  .stat b { display:block; font-size:22px; } .stat span { color:var(--muted); font-size:12px; }
+  .grid { display:grid; grid-template-columns: 1fr 1.25fr; gap:18px; align-items:start; }
+  @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:18px; }
+  h2 { font-size:15px; margin:0 0 10px; display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  h2 small { color:var(--muted); font-weight:400; font-size:12px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .row input[type=text] { flex:1 1 240px; }
+  .topic { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .topic:last-child { border-bottom:none; }
+  .pill { background:#1d2740; color:var(--accent); border-radius:999px; padding:1px 9px; font-size:12px; font-weight:600; }
+  .answer { white-space:pre-wrap; background:#0d1220; border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:10px; font-size:13.5px; }
+  .cites { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .cite-btn { background:#16203a; border:1px solid var(--line); border-radius:8px; padding:5px 10px; font-size:12px; color:var(--accent); }
+  .preview { margin-top:12px; display:none; }
+  .preview img { max-width:100%; border-radius:8px; border:1px solid var(--line); background:#fff; }
+  .steps { margin-top:10px; font-size:12px; color:var(--muted); }
+  .step-item { padding:4px 8px; border-left:2px solid var(--accent); margin:4px 0; background:#0d1220; border-radius:4px; }
+  .empty { color:var(--muted); font-size:13px; padding:10px 0; }
+  #toast { position:fixed; bottom:20px; right:20px; background:#14351f; color:#d7f5e3; border:1px solid var(--ok);
+    padding:10px 16px; border-radius:10px; display:none; max-width:420px; z-index:20; }
+  #toast.err { background:#3b1219; border-color:var(--bad); color:#ffd9de; }
+</style>
+<link rel="stylesheet" href="/theme/vr-theme.css">
+<script src="/theme/vr-shell.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1><span>Healthcare SOP</span> · Clinical Procedure Console</h1>
+      <div class="sub">Most-asked SOP topics, cited clinical guidance, checklist generation, and read-only agent assist.</div>
+    </div>
+    <div class="authbar">
+      <span id="auth-badge" class="badge">Checking token...</span>
+      <input id="token-input" type="password" placeholder="Paste vrk_... or user token" aria-label="Access token">
+      <button id="save-token" class="primary">Set Token</button>
+      <button id="clear-token">Logout</button>
+    </div>
+  </header>
+
+  <div id="disabled-banner" class="banner"></div>
+
+  <div class="stats">
+    <div class="stat"><b id="s-topics">-</b><span>tracked SOP topics</span></div>
+    <div class="stat"><b id="s-asks">-</b><span>total topic queries</span></div>
+    <div class="stat"><b id="s-status">-</b><span>pack status</span></div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <section class="card">
+        <h2>Top Clinical SOP Topics <small>from question.asked telemetry</small></h2>
+        <div id="topics-list"><div class="empty">Loading topics...</div></div>
+      </section>
+
+      <section class="card">
+        <h2>Generate SOP Checklist <small>/api/v1/packs/healthcare_sop/checklist</small></h2>
+        <div class="row">
+          <input id="checklist-topic" type="text" placeholder="Enter SOP topic (e.g. sterile IV line prep)">
+          <button id="gen-checklist" class="go">Generate</button>
+        </div>
+        <div id="checklist-out" class="empty">Enter a topic to generate a cited clinical checklist.</div>
+      </section>
+    </div>
+
+    <div>
+      <section class="card">
+        <h2>Cited Clinical SOP Q&amp;A <small>POST /api/v1/ask</small></h2>
+        <div class="row">
+          <input id="ask-input" type="text" placeholder="Ask a clinical SOP question...">
+          <select id="ask-style" aria-label="Answer style">
+            <option value="full">full</option>
+            <option value="glance">glance</option>
+          </select>
+          <button id="ask-btn" class="primary">Ask</button>
+        </div>
+        <div id="ask-answer" class="answer" hidden></div>
+        <div id="ask-cites" class="cites"></div>
+        <div id="ask-preview" class="preview">
+          <div class="sub" id="preview-caption" style="margin-bottom:6px;"></div>
+          <img id="preview-img" alt="Cited SOP page">
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Read-Only Agent Assist <small>POST /api/v1/agent/run</small></h2>
+        <div class="row">
+          <input id="agent-input" type="text" placeholder="Run a bounded read-only query (e.g. List top SOP topics and summarize)">
+          <button id="agent-btn" class="primary">Run Agent</button>
+        </div>
+        <div id="agent-out" class="empty">Agent step trace and final answer appear here.</div>
+      </section>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+'use strict';
+const TOKEN_KEY = 'vr-user-token';
+const params = new URLSearchParams(location.search);
+try {
+  if (params.get('token')) {
+    localStorage.setItem(TOKEN_KEY, params.get('token'));
+    params.delete('token');
+    const qs = params.toString();
+    history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+  }
+} catch (e) {}
+
+function getToken() {
+  try { return (localStorage.getItem(TOKEN_KEY) || '').trim(); } catch (e) { return ''; }
+}
+function setToken(v) {
+  try {
+    if (v) localStorage.setItem(TOKEN_KEY, v.trim());
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (e) {}
+  updateAuthBadge();
+}
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const tok = getToken();
+  if (tok) {
+    if (tok.startsWith('vrk_')) h['Authorization'] = 'Bearer ' + tok;
+    else h['X-VR-Token'] = tok;
+  }
+  return h;
+}
+function updateAuthBadge() {
+  const tok = getToken();
+  const el = document.getElementById('auth-badge');
+  if (!tok) { el.textContent = 'No token set'; el.className = 'badge warn'; return; }
+  el.textContent = tok.startsWith('vrk_') ? 'API Key (Bearer vrk_...)' : 'User Token (X-VR-Token)';
+  el.className = 'badge ok';
+}
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = isErr ? 'err' : '';
+  t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+async function api(path, opts) {
+  const o = Object.assign({}, opts || {});
+  o.headers = authHeaders(o.headers);
+  const r = await fetch(path, o);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.detail || data.error || ('HTTP ' + r.status));
+    err.status = r.status;
+    throw err;
+  }
+  return data;
+}
+
+let activeBlob = null;
+async function previewCitation(c) {
+  const box = document.getElementById('ask-preview');
+  const img = document.getElementById('preview-img');
+  const cap = document.getElementById('preview-caption');
+  if (activeBlob) { URL.revokeObjectURL(activeBlob); activeBlob = null; }
+  try {
+    const r = await fetch(`/api/v1/documents/${encodeURIComponent(c.doc_uid)}/pages/${c.page}.jpg?w=600`, { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    activeBlob = URL.createObjectURL(blob);
+    img.src = activeBlob;
+    cap.textContent = `${c.title} — Page ${c.page}`;
+    box.style.display = 'block';
+  } catch (e) {
+    toast('Could not load page preview: ' + e.message, true);
+  }
+}
+
+async function loadTopics() {
+  const banner = document.getElementById('disabled-banner');
+  banner.style.display = 'none';
+  try {
+    const res = await api('/api/v1/packs/healthcare_sop/topics?limit=10');
+    const topics = res.topics || [];
+    document.getElementById('s-topics').textContent = String(topics.length);
+    document.getElementById('s-asks').textContent = String(topics.reduce((a, x) => a + (x.count || 0), 0));
+    document.getElementById('s-status').textContent = 'Enabled';
+    const box = document.getElementById('topics-list');
+    box.innerHTML = '';
+    if (!topics.length) {
+      box.innerHTML = '<div class="empty">No SOP topics recorded yet. Ask a clinical question to populate telemetry.</div>';
+      return;
+    }
+    for (const t of topics) {
+      const row = document.createElement('div');
+      row.className = 'topic';
+      const label = document.createElement('span');
+      label.textContent = t.topic;
+      const pill = document.createElement('span');
+      pill.className = 'pill';
+      pill.textContent = String(t.count);
+      row.append(label, pill);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    if (e.status === 404 || e.status === 403) {
+      document.getElementById('s-status').textContent = e.status === 404 ? 'Disabled' : 'Restricted';
+      banner.textContent = e.status === 404
+        ? 'Pack disabled for this tenant (healthcare_sop is turned off).'
+        : 'Access denied: provide a token with knowledge:read scope.';
+      banner.style.display = 'block';
+      document.getElementById('topics-list').innerHTML = '<div class="empty">Unavailable.</div>';
+    } else {
+      toast('Topics error: ' + e.message, true);
+    }
+  }
+}
+
+document.getElementById('save-token').onclick = () => {
+  setToken(document.getElementById('token-input').value);
+  document.getElementById('token-input').value = '';
+  loadTopics();
+};
+document.getElementById('clear-token').onclick = () => { setToken(''); loadTopics(); };
+
+document.getElementById('gen-checklist').onclick = async () => {
+  const topic = document.getElementById('checklist-topic').value.trim();
+  if (!topic) return toast('Enter a topic first', true);
+  const out = document.getElementById('checklist-out');
+  out.textContent = 'Generating checklist...';
+  try {
+    const res = await api('/api/v1/packs/healthcare_sop/checklist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic }),
+    });
+    out.className = 'answer';
+    out.textContent = res.checklist || '(empty checklist)';
+  } catch (e) {
+    out.className = 'empty';
+    out.textContent = 'Checklist error: ' + e.message;
+  }
+};
+
+document.getElementById('ask-btn').onclick = async () => {
+  const q = document.getElementById('ask-input').value.trim();
+  const style = document.getElementById('ask-style').value;
+  if (!q) return toast('Enter a question first', true);
+  const ansEl = document.getElementById('ask-answer');
+  const citesEl = document.getElementById('ask-cites');
+  ansEl.hidden = false;
+  ansEl.textContent = 'Searching clinical SOPs...';
+  citesEl.innerHTML = '';
+  try {
+    const res = await api('/api/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, style }),
+    });
+    ansEl.textContent = `${res.answer}\n\n[mode: ${res.mode || 'unknown'}]`;
+    for (const c of (res.citations || [])) {
+      const btn = document.createElement('button');
+      btn.className = 'cite-btn';
+      btn.textContent = `[${c.n}] ${c.title} p.${c.page}`;
+      btn.onclick = () => previewCitation(c);
+      citesEl.appendChild(btn);
+    }
+    loadTopics();
+  } catch (e) {
+    ansEl.textContent = 'Error: ' + e.message;
+  }
+};
+
+document.getElementById('agent-btn').onclick = async () => {
+  const q = document.getElementById('agent-input').value.trim();
+  if (!q) return toast('Enter an agent query', true);
+  const out = document.getElementById('agent-out');
+  out.className = 'empty';
+  out.textContent = 'Running agent...';
+  try {
+    const res = await api('/api/v1/agent/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, max_steps: 5 }),
+    });
+    out.innerHTML = '';
+    const ans = document.createElement('div');
+    ans.className = 'answer';
+    ans.textContent = `[${res.status}] ${res.answer || ''}`;
+    out.appendChild(ans);
+    if (res.steps && res.steps.length) {
+      const stepsDiv = document.createElement('div');
+      stepsDiv.className = 'steps';
+      for (const s of res.steps) {
+        const item = document.createElement('div');
+        item.className = 'step-item';
+        item.textContent = `Step ${s.step}: ${s.tool} (read_only=${s.read_only})`;
+        stepsDiv.appendChild(item);
+      }
+      out.appendChild(stepsDiv);
+    }
+  } catch (e) {
+    out.textContent = 'Agent error: ' + e.message;
+  }
+};
+
+updateAuthBadge();
+loadTopics();
+</script>
+</body>
+</html>

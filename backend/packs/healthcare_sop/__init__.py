@@ -3,11 +3,15 @@
 Imports ONLY core.sdk and reaches the Core exclusively through ctx.
 """
 from collections import Counter
+from pathlib import Path
 
 from fastapi import Body, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from core.sdk import PolicyDenied
+
+DASHBOARD = Path(__file__).parent / "static" / "dashboard.html"
+NO_CACHE = {"Cache-Control": "no-store"}
 
 SIGNOFF = "healthcare_sop:signoff"
 TOPICS_STREAM = "topics"
@@ -56,6 +60,10 @@ def register(ctx):
         ctx.kv.put(request, "checklist", str(len(ctx.kv.list(request, "checklist")) + 1),
                    {"topic": topic, "checklist": checklist, "citations": citations})
         return {"topic": topic, "max_steps": max_steps, "checklist": checklist, "citations": citations}
+
+    @ctx.router.get("/dashboard")
+    def dashboard():
+        return FileResponse(DASHBOARD, headers=NO_CACHE)
 
     @ctx.router.get("/topics")
     def list_topics(request: Request, limit: int = 10):
