@@ -5,6 +5,7 @@ documents uploaded/changed/deleted. Never recorded: secrets (key secrets, tokens
 Entries are append-only through this class (there is no update or delete method).
 """
 import secrets
+import threading
 import time
 from typing import Optional
 
@@ -28,10 +29,15 @@ def _clean(details: Optional[dict]) -> dict:
 class AuditLog:
     def __init__(self, kv):
         self.kv = kv
+        self._lock = threading.Lock()
+        self._last_ns = 0
 
     def record(self, action: str, actor: str = "", target: str = "", tenant_id: Optional[str] = None,
                details: Optional[dict] = None) -> dict:
-        eid = f"{time.time_ns():020d}-{secrets.token_hex(3)}"
+        with self._lock:
+            ns = max(time.time_ns(), self._last_ns + 1)
+            self._last_ns = ns
+        eid = f"{ns:020d}-{secrets.token_hex(3)}"
         e = {"id": eid, "ts": time.time(), "tenant_id": tenant_id or current_tenant(), "actor": actor or "unknown",
              "action": action, "target": str(target)[:200], "details": _clean(details)}
         self.kv.kv_put("audit", eid, e)

@@ -57,7 +57,7 @@ def register(app, store, search, llm, auth, core=None, identity=None, kernel=Non
     def module_tools():
         if kernel is None:
             return {}
-        return {n: v for n, v in sorted(kernel.tools.items()) if kernel.modules.enabled(v[0])}
+        return {n: v for n, v in sorted(kernel.tools.items()) if kernel.modules.enabled(v[0]) and v[1].read_only}
 
     def tool_spec(t):
         return {"name": t.name, "description": t.description, "inputSchema": t.input_schema,

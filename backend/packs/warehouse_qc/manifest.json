@@ -1,0 +1,49 @@
+{
+  "id": "warehouse_qc",
+  "name": "Warehouse & Quality Control",
+  "version": "1.0.0",
+  "kind": "pack",
+  "core": ">=1.2,<2.0",
+  "description": "Warehouse lot quarantine controls, inspection status lookup, and QC question telemetry",
+  "requires_scopes": ["knowledge:read", "events:publish"],
+  "provides_scopes": ["warehouse_qc:quarantine", "warehouse_qc:approve"],
+  "subscribes": ["question.asked"],
+  "publishes": ["warehouse_qc.lot_quarantined", "warehouse_qc.lot_released"],
+  "mcp_tools": [
+    {
+      "name": "warehouse_qc_lookup_lot",
+      "description": "Look up the quarantine status and inspection notes for a warehouse lot ID.",
+      "read_only": true,
+      "input_schema": {
+        "type": "object",
+        "required": ["lot_id"],
+        "properties": {
+          "lot_id": {"type": "string", "description": "Warehouse lot identifier, e.g. LOT-42"}
+        }
+      }
+    },
+    {
+      "name": "warehouse_qc_summary",
+      "description": "Return a compact summary of quarantined lots and top recurring QC questions for this tenant.",
+      "read_only": true,
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "warehouse_qc_quarantine_lot",
+      "description": "Place a warehouse lot into quarantine with a reason and severity (requires human approval).",
+      "read_only": false,
+      "input_schema": {
+        "type": "object",
+        "required": ["lot_id", "reason"],
+        "properties": {
+          "lot_id": {"type": "string"},
+          "reason": {"type": "string"},
+          "severity": {"type": "string", "default": "high"}
+        }
+      }
+    }
+  ]
+}
