@@ -27,7 +27,7 @@ LIMIT_KEYS = {"ai_daily": "limits.ai_daily"}
 
 
 def register_admin(app, identity, tenants, keys, config=None, modules=None, audit=None, loader=None, bus=None,
-                   emit=None):
+                   emit=None, ai_ledger=None):
     def guard(req):
         try:
             identity.require(req, "admin")
@@ -248,3 +248,14 @@ def register_admin(app, identity, tenants, keys, config=None, modules=None, audi
     @app.get("/api/core/audit")
     def audit_list(req: Request, tenant_id: str = "", action: str = "", limit: int = 200):
         return guard(req) or {"events": audit.list(tenant_id or None, action or None, limit)}
+
+    @app.get("/api/core/ai/usage")
+    def ai_usage(req: Request, tenant_id: str = "", day: str = ""):
+        if (g := guard(req)) is not None:
+            return g
+        tid = tenant_id or "default"
+        if no_tenant(tid):
+            return bad(f"no tenant {tid!r}", 404)
+        if ai_ledger is None:
+            return {"tenant_id": tid, "day": day, "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
+        return {"tenant_id": tid, **ai_ledger.daily_summary(tid, day or None)}

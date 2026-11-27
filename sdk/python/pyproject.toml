@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-vr-sdk"
+version = "1.0.0"
+description = "Zero-dependency typed Python client SDK for the RAG-VR-AI /api/v1 partner API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rag_vr_sdk*"]

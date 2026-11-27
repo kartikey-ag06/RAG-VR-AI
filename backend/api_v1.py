@@ -46,8 +46,9 @@ from pathlib import Path
 
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from core.agents import ApprovalConflict
 from core.data.tenancy import current_tenant, doc_tenant
-from core.sdk.context import BudgetExceeded, PolicyDenied
+from core.sdk.context import BudgetExceeded, PolicyDenied, Principal
 from frame_gate import evaluate_frame
 from net import JSONB
 from session_state import build_context_hint, entity_state_dict, get_session, upsert_session
@@ -129,7 +130,7 @@ def extractive(hits, n=3):
     return "\n".join(out)
 
 
-def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None, config=None, prompts=None, events=None):
+def register(app, store, run_search, llm_complete, llm_stream, auth, provider, vision=None, identity=None, config=None, prompts=None, events=None, ai=None, agents=None):
     lock = threading.Lock()
     thumbs = OrderedDict()                       # resized page images, LRU (small displays ask for the same pages)
 
@@ -292,6 +293,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
             if not isinstance(ref, dict):
                 continue
             uid, page = str(ref.get("doc_uid") or ""), ref.get("page")
+            if page is None:
+                continue
             try:
                 i = int(ref.get("i", -1))
                 page = int(page)
@@ -317,7 +320,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         p = provider()
         snap = store.snapshot
         vis = False
-        if vision and p and p["name"] == "groq":
+        can_vision = ai.supports("vision") if ai is not None else bool(p and p["name"] == "groq")
+        if vision and can_vision:
             try:
                 vis = bool(vision["status"]().get("available"))
             except Exception:
@@ -446,7 +450,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
         metrics = None
         if gate:
             try:
-                img_bytes = base64.b64decode(image.split(",", 1)[1], validate=True)
+                img_bytes = base64.b64decode(str(image).split(",", 1)[1], validate=True)
                 gate_res = evaluate_frame(img_bytes, last_dhash=sess.last_dhash if sess else None)
                 metrics = gate_res.to_dict()
             except Exception:
@@ -481,7 +485,8 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                         "gate_metrics": metrics,
                         "entity_state": entity_state_dict(sess),
                     }
-                rag_photo = dict(sess.last_vision_summary)
+                summary = sess.last_vision_summary
+                rag_photo = dict(summary)
                 ctx_hint = build_context_hint(sess)
                 if ctx_hint:
                     rag_photo["details"] = (rag_photo.get("details") or "") + f" ({ctx_hint})"
@@ -500,7 +505,7 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                     session_id=session_id,
                     gate_metrics=metrics,
                     entity_state=entity_state_dict(sess),
-                    photo={k: sess.last_vision_summary.get(k, "") for k in ("object", "details", "text_seen")},
+                    photo={k: summary.get(k, "") for k in ("object", "details", "text_seen")},
                 )
                 return out
 
@@ -558,26 +563,30 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
                 "image_url": page_url(uid, n), "image_url_small": page_url(uid, n, 600)}
 
     def page_image(uid, n, w):
-        p = store.page_image_uid(uid, n)
-        if not p:
-            return JSONResponse({"error": "page not found"}, 404)
+        raw = store.read_page_bytes(uid, n) if hasattr(store, "read_page_bytes") else None
+        if raw is None:
+            p = store.page_image_uid(uid, n)
+            if not p:
+                return JSONResponse({"error": "page not found"}, 404)
+            raw = p.read_bytes()
         headers = {"Cache-Control": "private, max-age=3600"}
         try:
             w = int(w) if w else 0
         except ValueError:
             w = 0
         if not w:
-            return Response(p.read_bytes(), media_type="image/jpeg", headers=headers)
+            return Response(raw, media_type="image/jpeg", headers=headers)
         w = max(200, min(1600, w))
-        key = (str(p), p.stat().st_mtime, w)
+        rev_ver = store.revisions(uid).get("version", "1.0")
+        key = (uid, n, rev_ver, len(raw), w)
         with lock:
             data = thumbs.get(key)
         if data is None:
             from PIL import Image
-            with Image.open(p) as im:
+            with Image.open(BytesIO(raw)) as im:
                 im = im.convert("RGB")
                 if im.width > w:
-                    im = im.resize((w, max(1, round(im.height * w / im.width))), Image.LANCZOS)
+                    im = im.resize((w, max(1, round(im.height * w / im.width))), Image.Resampling.LANCZOS)
                 buf = BytesIO()
                 im.save(buf, "JPEG", quality=82, optimize=True)
                 data = buf.getvalue()
@@ -590,6 +599,77 @@ def register(app, store, run_search, llm_complete, llm_stream, auth, provider, v
     @app.get("/hud")
     def hud_page():
         return FileResponse(Path(__file__).resolve().parent / "static" / "hud.html", headers={"Cache-Control": "no-cache"})
+
+    # ------------------------------------------------------------ Phase 12: Core Agents
+    def _agent_principal(req: Request, scope: str):
+        if identity is not None:
+            p, u = identity.require(req, scope)
+            return p, u
+        return Principal(tenant_id=current_tenant(), kind="user", scopes=frozenset({"admin"})), auth.user_of(req)
+
+    @app.post(f"{API}/agent/run")
+    def v1_agent_run(req: Request, _body=JSONB):
+        if agents is None:
+            return JSONResponse({"error": "agents not configured"}, 501)
+        try:
+            p, user = _agent_principal(req, "ai:ask")
+            if identity is not None:
+                identity.require(req, "knowledge:read")
+        except PolicyDenied as e:
+            return denied(e)
+        b = _body or {}
+        try:
+            return agents.run(b.get("question", ""), p, max_steps=b.get("max_steps"), req=req, user=user)
+        except BudgetExceeded as e:
+            return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
+        except PolicyDenied as e:
+            return JSONResponse({"error": e.reason}, e.status)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, 400)
+
+    @app.get(f"{API}/agent/approvals/{{approval_id}}")
+    def v1_agent_approval_get(approval_id: str, req: Request):
+        if agents is None:
+            return JSONResponse({"error": "agents not configured"}, 501)
+        try:
+            _agent_principal(req, "knowledge:read")
+        except PolicyDenied as e:
+            return denied(e)
+        rec = agents.approvals.get(approval_id, current_tenant())
+        if rec is None:
+            return JSONResponse({"error": "approval not found"}, 404)
+        return {k: rec[k] for k in ("approval_id", "tenant_id", "tool_name", "module_id",
+                                    "required_scope", "args", "status", "created_at", "expires_at")}
+
+    @app.post(f"{API}/agent/approvals/{{approval_id}}/approve")
+    def v1_agent_approval_approve(approval_id: str, req: Request):
+        if agents is None:
+            return JSONResponse({"error": "agents not configured"}, 501)
+        try:
+            p, user = _agent_principal(req, "knowledge:read")
+            return agents.approve(approval_id, p, req=req, user=user)
+        except LookupError as e:
+            return JSONResponse({"error": str(e)}, 404)
+        except ApprovalConflict as e:
+            return JSONResponse({"error": str(e)}, 409)
+        except BudgetExceeded as e:
+            return JSONResponse({"error": e.reason}, 429, headers={"Retry-After": "3600"})
+        except PolicyDenied as e:
+            return JSONResponse({"error": e.reason}, e.status)
+
+    @app.post(f"{API}/agent/approvals/{{approval_id}}/reject")
+    def v1_agent_approval_reject(approval_id: str, req: Request):
+        if agents is None:
+            return JSONResponse({"error": "agents not configured"}, 501)
+        try:
+            p, _ = _agent_principal(req, "knowledge:read")
+            return agents.reject(approval_id, p)
+        except LookupError as e:
+            return JSONResponse({"error": str(e)}, 404)
+        except ApprovalConflict as e:
+            return JSONResponse({"error": str(e)}, 409)
+        except PolicyDenied as e:
+            return denied(e)
 
     # shared with mcp_server.py so MCP answers are the same answers the glasses get
     return {"answer": answer, "search": find, "passage": passage, "page_url": page_url, "visible": visible}

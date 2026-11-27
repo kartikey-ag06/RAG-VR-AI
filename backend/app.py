@@ -83,6 +83,7 @@ async def _policy_denied(_req, e: PolicyDenied):
 # optional Postgres (Neon) + pgvector: set DATABASE_URL or put the URL in database_url.txt (git-ignored)
 # VR_RAG_NO_DB=1 forces local files even when a database is configured (tests must never touch the real database).
 from core.data import DB, LocalJournal, LocalKV, PgJournal, database_url
+from core.data.blobs import create_blob_store
 from auth import Auth
 from core.identity import ApiKeys, Identity, TenantContext, Tenants
 from core.config import ConfigStore
@@ -109,7 +110,8 @@ def _make_db(c):
 
 SERVICES = Container()
 SERVICES.register("db", _make_db)
-SERVICES.register("store", lambda c: Store(SETTINGS.data_dir, seed_dir=SETTINGS.seed_dir, db=c.get("db")))
+SERVICES.register("blobs", lambda c: create_blob_store(SETTINGS.data_dir))
+SERVICES.register("store", lambda c: Store(SETTINGS.data_dir, seed_dir=SETTINGS.seed_dir, db=c.get("db"), blobs=c.get("blobs")))
 SERVICES.register("kv", lambda c: c.get("db") or LocalKV(SETTINGS.data_dir))   # reminders, pins, sessions...
 SERVICES.register("journal", lambda c: PgJournal(c.get("db")) if c.get("db") else LocalJournal(SETTINGS.data_dir))
 SERVICES.register("auth", lambda c: Auth(c.get("kv")))
@@ -119,6 +121,7 @@ SERVICES.register("identity", lambda c: Identity(c.get("keys"), c.get("auth")))
 SERVICES.register("config", lambda c: ConfigStore(c.get("kv")))
 SERVICES.register("audit", lambda c: AuditLog(c.get("kv")))
 SERVICES.register("modules", lambda c: ModuleRegistry(c.get("kv")))
+SERVICES.register("ai_ledger", lambda c: AILedger(c.get("db")))
 app.state.services = SERVICES
 
 # old global names kept as aliases, so feature modules and tests keep working unchanged
@@ -132,13 +135,22 @@ CONFIG = SERVICES.get("config")           # central settings: global < tenant < 
 AUDIT = SERVICES.get("audit")             # who did what (core/observability)
 MODULES = SERVICES.get("modules")         # feature modules + on/off per tenant (core/modules)
 CONFIG.declare("ai.chat_model", "string", "", "Chat model for this scope; empty = choose automatically")
+CONFIG.declare("ai.provider", "string", "", "AI provider: '', 'groq', 'grok', 'bedrock', or 'foundry'",
+               choices=("", "groq", "grok", "bedrock", "foundry"))
+CONFIG.declare("ai.region", "string", "", "Cloud region for AI provider (e.g. us-east-1, ap-south-1)")
+CONFIG.declare("ai.fallback", "string", "", "Comma-separated fallback providers (e.g. groq,grok)")
+CONFIG.declare("ai.daily_cost_usd", "number", 0.0, "Max daily AI cost in USD per tenant; 0 = no limit", min=0.0)
+CONFIG.declare("ai.agent_max_steps", "integer", 5, "Max tool-loop steps per agent run (1-10)", min=1, max=10)
 CONFIG.declare("search.low_confidence", "number", 0.62, "Best semantic match below this = low confidence",
                min=0.0, max=1.0)
 CONFIG.declare("limits.ai_daily", "integer", 0, "AI provider calls per tenant per UTC day; 0 = no limit", min=0)
 # capabilities and packs register themselves from their manifest.json (core/plugins) - see the loader below.
 ALIASES = {}                                              # old URL prefix -> pack URL (filled by the loader)
-BUS = EventBus(enabled=MODULES.enabled, log=log)          # in-process events: Core -> modules (core/plugins)
+BUS = EventBus(enabled=MODULES.enabled, log=log, db=DBX)  # in-process or Postgres SKIP LOCKED (core/plugins)
 PROMPTS = PromptRegistry(CONFIG)                          # every system prompt, by id (core/ai/prompts)
+from session_state import SCAN_SESSIONS  # noqa: E402
+if DBX is not None:
+    SCAN_SESSIONS.set_kv(KV)                              # share scan sessions across instances via Postgres
 
 
 def emit(name, data, tenant_id=None, source="core"):
@@ -320,29 +332,30 @@ def _doc_visible(pos, req):
 @app.get("/rag/figures/{pos}/{file}")
 def rag_figure(pos: int, file: str, req: Request):
     uids = STORE.snapshot["uids"]
-    p = STORE.figure_image(uids[pos], file) if 0 <= pos < len(uids) and _doc_visible(pos, req) else None
-    if not p:
+    raw = STORE.read_figure_bytes(uids[pos], file) if 0 <= pos < len(uids) and _doc_visible(pos, req) else None
+    if raw is None:
         return JSONResponse({"error": "figure not found"}, 404)
-    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+    return Response(raw, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/rag/pages/{name}")
 def rag_page(name: str, req: Request):
     m = re.fullmatch(r"d(\d+)_p(\d+)\.jpg", name)
-    p = STORE.page_image(int(m.group(1)), int(m.group(2))) if m and _doc_visible(int(m.group(1)), req) else None
-    if not p:
+    raw = STORE.read_page_bytes_by_pos(int(m.group(1)), int(m.group(2))) if m and _doc_visible(int(m.group(1)), req) else None
+    if raw is None:
         return JSONResponse({"error": "page not found"}, 404)
-    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+    return Response(raw, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 # ---------------------------------------------------------------- LLM provider (Groq / Grok) -> core/ai
-from core.ai import AIGateway, SseReader, clean_messages
+from core.ai import AIGateway, AILedger, SseReader, clean_messages
 from core.sdk.context import BudgetExceeded, PolicyDenied
 
 KEY_FILE = ROOT / "grok_api_key.txt"
 MODEL_FILE = ROOT / "grok_model.txt"
 # key_file / model_file are read through these lambdas so a test can still swap KEY_FILE / MODEL_FILE on this module
-AI = AIGateway(HTTP, os.environ, key_file=lambda: KEY_FILE, model_file=lambda: MODEL_FILE, log=log, config=CONFIG)
+AI = AIGateway(HTTP, os.environ, key_file=lambda: KEY_FILE, model_file=lambda: MODEL_FILE, log=log,
+               config=CONFIG, ledger=SERVICES.get("ai_ledger"))
 
 # old names kept as aliases: feature modules (vision, api_v1, procops, ...) and tests use them unchanged
 get_key, provider, list_models = AI.get_key, AI.provider, AI.list_models
@@ -356,7 +369,7 @@ _clean_messages = clean_messages
 def status():
     p = provider()
     return {"configured": bool(p), "provider": p["name"] if p else "", "model": chat_model() if p else "",
-            "stt": bool(p and p["name"] == "groq"),
+            "stt": AI.supports("transcribe"),
             "search": "hybrid" if EMB["state"] == "ready" else ("keyword (embeddings " + EMB["state"] + ")"),
             "docs": sum(1 for d in STORE.snapshot["index"]["docs"] if doc_tenant(d) == current_tenant()),  # this tenant only
             "indexVersion": STORE.snapshot["version"],
@@ -476,8 +489,7 @@ def grok_stream(req: Request, _body=JSONB):
 async def stt(req: Request):
     if AUTH.admin_required(req) and not (AUTH.is_admin(req) or AUTH.user_of(req)):
         return JSONResponse({"error": "unauthorized"}, 401)
-    p = provider()
-    if not p or p["name"] != "groq":
+    if not AI.supports("transcribe"):
         return JSONResponse({"error": "Voice transcription needs a Groq key (gsk_...)"}, 400)
     audio = await req.body()
     if len(audio) < 800:
@@ -558,7 +570,7 @@ LOADER = PackLoader(app, KERNEL, _PACK_DIRS, allow_scopes=allow_pack_scopes,
     # old-style dependencies for capabilities not yet moved to the SDK (manifest "legacy": true) - ADR 0006
     "app": app, "kv": KV, "auth": AUTH, "store": STORE, "root": ROOT, "llm_complete": llm_complete,
     "run_search": run_search, "provider": provider, "get_key": get_key, "list_models": list_models,
-    "spend": AI.spend, "report_kinds": _report_kinds, "emit": emit})
+    "spend": AI.spend, "ai": AI, "report_kinds": _report_kinds, "emit": emit})
 LOADER.load_all()
 
 
@@ -616,10 +628,18 @@ def admin_user_delete(uid: str, req: Request):
 VISION = LOADER.exports.get("vision")       # photo pipeline, shared with /api/v1/scan
 
 
+from core.agents import AgentRunner, ApprovalStore, ToolRegistry
+
+AGENT_TOOLS = ToolRegistry(STORE, run_search, AUTH, kernel=KERNEL)
+AGENT_APPROVALS = ApprovalStore(kv=KV)
+AGENTS = AgentRunner(AI, AGENT_TOOLS, AGENT_APPROVALS, AUDIT, CONFIG, MODULES)
+SERVICES.register("agents", lambda _c: AGENTS)
+
 # ---------------------------------------------------------------- one API for every glasses client ("many doors")
 import api_v1
 CORE = _register("api v1", lambda: api_v1.register(app, STORE, run_search, llm_complete, llm_stream, AUTH, provider, VISION,
-                                                   identity=IDENTITY, config=CONFIG, prompts=PROMPTS, events=emit))
+                                                   identity=IDENTITY, config=CONFIG, prompts=PROMPTS, events=emit,
+                                                   ai=AI, agents=AGENTS))
 if CORE:
     KERNEL.answer = lambda q, tag, style, lang, user, door: CORE["answer"](q, tag, style, lang, user, door=door)
 _register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complete, AUTH, CORE, identity=IDENTITY,
@@ -627,7 +647,7 @@ _register("mcp", lambda: mcp_server.register(app, STORE, run_search, llm_complet
 from core.admin import register_admin
 _register("control plane", lambda: register_admin(app, IDENTITY, SERVICES.get("tenants"), SERVICES.get("keys"),
                                                     config=CONFIG, modules=MODULES, audit=AUDIT, loader=LOADER,
-                                                    bus=BUS, emit=emit))
+                                                    bus=BUS, emit=emit, ai_ledger=SERVICES.get("ai_ledger")))
 
 
 @app.post("/api/server/stop")

@@ -33,7 +33,7 @@ DESCRIBE_PROMPT = (
 )
 
 
-def register(app, provider, get_key, list_models, root, auth=None, spend=None):
+def register(app, provider, get_key, list_models, root, auth=None, spend=None, ai=None):
     cache = {"model": None, "t": 0}
     override = root / "vision_model.txt"
 
@@ -55,13 +55,21 @@ def register(app, provider, get_key, list_models, root, auth=None, spend=None):
     import threading
     threading.Thread(target=_warm, daemon=True).start()
 
-    def call(image, system, user, max_tokens=700):
+    def _supports_vision():
+        if ai is not None:
+            return ai.supports("vision")
         p = provider()
-        if not p or p["name"] != "groq":
+        return bool(p and p["name"] == "groq")
+
+    def call(image, system, user, max_tokens=700):
+        if not _supports_vision():
             raise RuntimeError("Photo questions need a Groq key (gsk_...) in grok_api_key.txt")
         model = vision_model()
         if not model:
             raise RuntimeError("No vision model is available on this Groq account")
+        if ai is not None:
+            return ai.vision(image, system=system, user=user, model=model, max_tokens=max_tokens, timeout=90)
+        p = provider()
         msgs = ([{"role": "system", "content": system}] if system else []) + [
             {"role": "user", "content": [{"type": "text", "text": user},
                                          {"type": "image_url", "image_url": {"url": image}}]}]
@@ -73,7 +81,6 @@ def register(app, provider, get_key, list_models, root, auth=None, spend=None):
                               json=body, timeout=90)
             if r.status_code != 429 or attempt == 2:
                 break
-            # free-tier limit per minute: Groq says how long to wait ("try again in 1.13s") - wait once, then retry
             m = re.search(r"try again in ([\d.]+)s", r.text)
             wait = float(m.group(1)) + 0.5 if m else 3.0
             if wait > 15:
@@ -94,8 +101,7 @@ def register(app, provider, get_key, list_models, root, auth=None, spend=None):
 
     @app.get("/api/vision/status")
     def vision_status():
-        p = provider()
-        if not p or p["name"] != "groq":
+        if not _supports_vision():
             return {"available": False, "reason": "needs a Groq key"}
         try:
             m = vision_model()

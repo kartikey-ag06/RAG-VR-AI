@@ -32,6 +32,7 @@ CHUNK_WORDS, OVERLAP = 120, 30
 IMG_W, IMG_H = 1000, 1414          # A4 ratio, same width as the PDF page renders
 WORDS_PER_TEXT_PAGE = 330          # DOCX/TXT are split into "pages" of about this many words
 
+from core.data.blobs import create_blob_store
 from core.data.tenancy import DEFAULT_TENANT, current_tenant, doc_tenant
 from core.knowledge.stopwords import load_stopwords   # generic words + corpus word files (backend/config/stopwords/)
 STOP = load_stopwords(Path(__file__).resolve().parent.parent)
@@ -221,10 +222,19 @@ def _decodes(raw, enc):
 
 
 # ------------------------------------------------------------------ the store
+def _content_type(ext: str) -> str:
+    return {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".txt": "text/plain; charset=utf-8",
+    }.get(ext.lower(), "application/octet-stream")
+
+
 class Store:
-    def __init__(self, root: Path, seed_dir: Path = None, db=None):
+    def __init__(self, root: Path, seed_dir: Path = None, db=None, blobs=None):
         self.root = root
         self.db = db                      # db.DB (Postgres/Neon) or None = local files only
+        self.blobs = blobs if blobs is not None else create_blob_store(root)
         self.files, self.pages, self.emb = root / "files", root / "pages", root / "emb"
         for p in (self.files, self.pages, self.emb):
             p.mkdir(parents=True, exist_ok=True)
@@ -238,6 +248,7 @@ class Store:
             except Exception as ex:
                 print(f"[procops] bad revision file {f.name}: {ex}", flush=True)
         self.lock = threading.RLock()
+        self._last_sync = time.time()
         self.queue = []
         self.wake = threading.Event()
         self.embedder = None            # set by app.py once the embedding model is loaded
@@ -302,10 +313,54 @@ class Store:
         with self.lock:
             self.revs.pop(uid, None)
         (self.revs_dir / f"{uid}.json").unlink(missing_ok=True)
+        if e.get("blob_key"):
+            self.blobs.delete(e["blob_key"])
+        self.blobs.delete_prefix(f"pages/{uid}/")
         if self.db:
             self.db.delete_doc(uid)
         self.request_rebuild()
         return True
+
+    def read_blob(self, key: str):
+        return self.blobs.get(key)
+
+    def read_page_bytes(self, uid: str, page: int, original: bool = False, rev: int = None):
+        if rev is not None:
+            key = f"pages/{uid}/p{page:03d}_r{rev}.jpg"
+            data = self.blobs.get(key)
+            if data is not None:
+                return data
+            p = self.pages / uid / f"p{page:03d}_r{rev}.jpg"
+            return p.read_bytes() if p.exists() else None
+        if not original:
+            r = self.revs.get(uid, {}).get("pages", {}).get(str(page))
+            if r:
+                data = self.blobs.get(f"pages/{uid}/{r['image']}")
+                if data is not None:
+                    return data
+                p = self.pages / uid / r["image"]
+                if p.exists():
+                    return p.read_bytes()
+        data = self.blobs.get(f"pages/{uid}/p{page:03d}.jpg")
+        if data is not None:
+            return data
+        p = self.pages / uid / f"p{page:03d}.jpg"
+        return p.read_bytes() if p.exists() else None
+
+    def read_page_bytes_by_pos(self, doc_pos: int, page: int):
+        uids = self.snapshot["uids"]
+        if 0 <= doc_pos < len(uids):
+            return self.read_page_bytes(uids[doc_pos], page)
+        return None
+
+    def read_figure_bytes(self, uid: str, file: str):
+        if not re.fullmatch(r"fig_p\d{3}_\d+\.jpg", file):
+            return None
+        data = self.blobs.get(f"pages/{uid}/{file}")
+        if data is not None:
+            return data
+        p = self.pages / uid / file
+        return p.read_bytes() if p.exists() else None
 
     def page_image(self, doc_pos, page):
         """Maps the VR app's positional URL d{doc}_p{page}.jpg to the stored image."""
@@ -361,6 +416,9 @@ class Store:
             image = f"p{page:03d}_r{n}.jpg"
             render_text_page(text, e["title"], page, e["pages"], self.pages / uid / image,
                              banner=f"REVISED v{version} - approved {when[:10]}" + (f" by {approver}" if approver else ""))
+            img_path = self.pages / uid / image
+            if img_path.exists():
+                self.blobs.put(f"pages/{uid}/{image}", img_path.read_bytes(), content_type="image/jpeg")
             rec = {"n": n, "version": version, "page": page, "summary": summary[:500], "approver": approver[:80],
                    "approved": when, "evidence": int(evidence)}
             r["version"] = version
@@ -415,7 +473,9 @@ class Store:
             for e in self.manifest:
                 f = self.files / f"{e['uid']}{e['ext']}"
                 if not f.exists():
-                    data = self.db.doc_data(e["uid"])
+                    data = self.blobs.get(e["blob_key"]) if e.get("blob_key") else None
+                    if data is None:
+                        data = self.db.doc_data(e["uid"])
                     if data:
                         f.write_bytes(data)
                 t = self.pages / e["uid"] / "text.json"
@@ -427,7 +487,30 @@ class Store:
                     else:
                         e["status"] = "processing"
             self.revs = self.db.revisions() or self.revs
+            self._last_sync = time.time()
             print(f"[db] {len(self.manifest)} documents loaded from the database", flush=True)
+
+    def refresh_from_db(self) -> bool:
+        """Reload manifest and revisions metadata from Postgres without downloading BYTEA blobs."""
+        if not self.db:
+            return False
+        remote = self.db.list_docs()
+        revs = self.db.revisions() or {}
+        with self.lock:
+            changed = (remote != self.manifest) or (revs != self.revs)
+            self.manifest = remote
+            self.revs = revs
+            self._last_sync = time.time()
+            if changed:
+                self._save_manifest()
+        if changed:
+            self.request_rebuild()
+        return changed
+
+    def refresh_if_stale(self, ttl: float = 5.0) -> bool:
+        if self.db and (time.time() - self._last_sync) > ttl:
+            return self.refresh_from_db()
+        return False
 
     def update_meta(self, uid, **fields):
         """Change title / tags (machine ids) / groups (who may see it) of a document."""
@@ -466,16 +549,17 @@ class Store:
         ext = Path(filename).suffix.lower()
         name = safe_name(filename)
         (self.files / f"{uid}{ext}").write_bytes(data)
+        blob_key = self.blobs.put(f"docs/{uid}{ext}", data, content_type=_content_type(ext))
         entry = {"uid": uid, "name": name, "ext": ext, "type": ext[1:].upper(), "size": len(data),
                  "title": pretty_title(name), "pages": 0, "status": "processing", "error": "",
                  "uploaded": datetime.now(timezone.utc).isoformat(timespec="seconds"), "seed": seeded,
-                 "sha256": hashlib.sha256(data).hexdigest(), "tenant_id": tenant_id}
+                 "sha256": hashlib.sha256(data).hexdigest(), "tenant_id": tenant_id, "blob_key": blob_key}
         entry.update(tags=list(tags or []), groups=list(groups or []))     # set before indexing: never briefly public
         with self.lock:
             self.manifest.append(entry)
             self._save_manifest()
         if self.db:
-            self.db.put_doc(entry, data)
+            self.db.put_doc(entry, data if self.blobs.name == "local" else None)
         if uid not in self.queue:
             self.queue.append(uid)
         self.wake.set()
@@ -508,6 +592,18 @@ class Store:
                 print(f"[index] rebuild failed: {ex}", flush=True)
             self.state = "idle"
 
+    def _upload_page_dir(self, uid):
+        pdir = self.pages / uid
+        if not pdir.is_dir():
+            return
+        for f in pdir.iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix == ".jpg":
+                self.blobs.put(f"pages/{uid}/{f.name}", f.read_bytes(), content_type="image/jpeg")
+            elif f.name == "figures.json":
+                self.blobs.put(f"pages/{uid}/figures.json", f.read_bytes(), content_type="application/json")
+
     def _figures_only(self, uid):
         e = self.doc_entry(uid)
         if not e:
@@ -519,6 +615,7 @@ class Store:
                 for i, page in enumerate(doc):
                     figs += _page_figures(page, i + 1, self.pages / uid)
             (self.pages / uid / "figures.json").write_text(json.dumps(figs), "utf-8")
+            self._upload_page_dir(uid)
             print(f"[figures] {e['name']}: {len(figs)} diagrams/tables cut out", flush=True)
         except Exception as ex:
             print(f"[figures] {e['name']}: {ex}", flush=True)
@@ -532,6 +629,7 @@ class Store:
         if images_only:                                   # text already known; only page images were missing
             try:
                 extract(self.files / f"{uid}{e['ext']}", e["ext"], self.pages / uid, e["title"])
+                self._upload_page_dir(uid)
                 print(f"[index] {e['name']}: page images redrawn in {time.time() - t0:.1f}s", flush=True)
             except Exception as ex:
                 print(f"[index] {e['name']}: redraw failed: {ex}", flush=True)
@@ -539,6 +637,7 @@ class Store:
         try:
             texts = extract(self.files / f"{uid}{e['ext']}", e["ext"], self.pages / uid, e["title"])
             (self.pages / uid / "text.json").write_text(json.dumps(texts), "utf-8")
+            self._upload_page_dir(uid)
             words = sum(len(t.split()) for t in texts)
             e.update(pages=len(texts), status="ready" if words else "error",
                      error="" if words else "No text found (scanned PDF? OCR is not supported yet)")

@@ -38,6 +38,8 @@ def check_value(spec: dict, value: Any) -> Any:
         raise ConfigError(f"must be at least {spec['min']}")
     if "max" in spec and value > spec["max"]:
         raise ConfigError(f"must be at most {spec['max']}")
+    if "choices" in spec and value not in spec["choices"]:
+        raise ConfigError(f"must be one of {', '.join(repr(c) for c in spec['choices'])}")
     return value
 
 

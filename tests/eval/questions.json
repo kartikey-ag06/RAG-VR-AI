@@ -1,0 +1,72 @@
+[
+  {
+    "id": "q01",
+    "question": "What penalty was imposed on Reliance Industries?",
+    "style": "full",
+    "expected_pages": [31, 81, 84, 85],
+    "required_terms": ["penalty", "sebi"]
+  },
+  {
+    "id": "q02",
+    "question": "What penalty was imposed on Reliance Industries?",
+    "style": "glance",
+    "expected_pages": [31, 81, 84, 85],
+    "required_terms": ["penalty"]
+  },
+  {
+    "id": "q03",
+    "question": "What penalty was imposed on Reliance Industries?",
+    "style": "spoken",
+    "expected_pages": [31, 81, 84, 85],
+    "required_terms": ["penalty"]
+  },
+  {
+    "id": "q04",
+    "question": "What was the diluted EPS non-disclosure issue?",
+    "style": "full",
+    "expected_pages": [1, 2, 14, 15],
+    "required_terms": ["eps"]
+  },
+  {
+    "id": "q05",
+    "question": "What happened in the Reliance Petroleum SAT order?",
+    "style": "glance",
+    "expected_pages": [1, 2, 53, 54],
+    "required_terms": ["reliance"]
+  },
+  {
+    "id": "q06",
+    "question": "Summarise the BH Kothari adjudication order.",
+    "style": "spoken",
+    "expected_pages": [1, 5, 6],
+    "required_terms": ["abate", "order"]
+  },
+  {
+    "id": "q07",
+    "question": "What did the Bombay High Court order state?",
+    "style": "full",
+    "expected_pages": [1, 2, 6, 7],
+    "required_terms": ["court"]
+  },
+  {
+    "id": "q08",
+    "question": "What is the rule against retroactive operation of penalties under Section 15H?",
+    "style": "full",
+    "expected_pages": [11, 31],
+    "required_terms": ["15h"]
+  },
+  {
+    "id": "q09",
+    "question": "What were the trading window closure rules?",
+    "style": "glance",
+    "expected_pages": [1, 2, 3],
+    "required_terms": ["trading"]
+  },
+  {
+    "id": "q10",
+    "question": "Who were the four entities in the Reliance Petroleum adjudication order?",
+    "style": "full",
+    "expected_pages": [1, 2, 94, 95],
+    "required_terms": ["reliance"]
+  }
+]

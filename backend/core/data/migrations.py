@@ -21,6 +21,40 @@ MIGRATIONS = [
         "ALTER TABLE events ALTER COLUMN stream SET DEFAULT ''",
         "CREATE INDEX IF NOT EXISTS events_tenant_stream ON events (tenant_id, stream, id)",
     ]),
+    (3, "ai_usage_daily and ai_ledger", [
+        "CREATE TABLE IF NOT EXISTS ai_usage_daily ("
+        "tenant_id text NOT NULL, "
+        "day date NOT NULL, "
+        "calls int NOT NULL DEFAULT 0, "
+        "prompt_tokens bigint NOT NULL DEFAULT 0, "
+        "completion_tokens bigint NOT NULL DEFAULT 0, "
+        "cost_usd double precision NOT NULL DEFAULT 0.0, "
+        "PRIMARY KEY (tenant_id, day))",
+        "CREATE TABLE IF NOT EXISTS ai_ledger ("
+        "id bigserial PRIMARY KEY, "
+        "ts timestamptz NOT NULL DEFAULT now(), "
+        "tenant_id text NOT NULL, "
+        "provider text NOT NULL, "
+        "model text NOT NULL, "
+        "capability text NOT NULL, "
+        "prompt_tokens int NOT NULL DEFAULT 0, "
+        "completion_tokens int NOT NULL DEFAULT 0, "
+        "cost_usd double precision NOT NULL DEFAULT 0.0)",
+        "CREATE INDEX IF NOT EXISTS ai_ledger_tenant_ts ON ai_ledger (tenant_id, ts DESC)",
+    ]),
+    (4, "core_event_queue for multi-instance EventBus", [
+        "CREATE TABLE IF NOT EXISTS core_event_queue ("
+        "id bigserial PRIMARY KEY, "
+        "name text NOT NULL, "
+        "tenant_id text NOT NULL, "
+        "source text NOT NULL DEFAULT '', "
+        "data jsonb NOT NULL DEFAULT '{}'::jsonb, "
+        "status text NOT NULL DEFAULT 'pending', "
+        "attempts int NOT NULL DEFAULT 0, "
+        "claimed_at timestamptz, "
+        "created_at timestamptz NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS core_event_queue_pending_idx ON core_event_queue (id) WHERE status = 'pending'",
+    ]),
 ]
 
 TRACKING = ("CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, name text NOT NULL, "

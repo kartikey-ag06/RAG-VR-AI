@@ -1,0 +1,897 @@
+openapi: 3.1.0
+info:
+  title: RAG-VR-AI Partner API
+  version: 1.0.0
+  description: |
+    Versioned partner API ("one brain, many doors") for smart glasses, Meta Ray-Ban Display (/hud),
+    mobile apps, and policy-gated AI agents.
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+
+security:
+  - BearerApiKey: []
+  - UserToken: []
+
+components:
+  securitySchemes:
+    BearerApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: vrk_...
+      description: "Scoped tenant API key (Authorization: Bearer vrk_...) or service MCP_TOKEN."
+    UserToken:
+      type: apiKey
+      in: header
+      name: X-VR-Token
+      description: "User session token (X-VR-Token header or ?token= query parameter)."
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        hint:
+          type: string
+        detail:
+          type: string
+
+    RateLimitError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [api, ok, ai, provider, photo, documents, index_version, styles, doors]
+      properties:
+        api:
+          type: string
+          example: v1
+        ok:
+          type: boolean
+        ai:
+          type: boolean
+        provider:
+          type: string
+        photo:
+          type: boolean
+        documents:
+          type: integer
+        index_version:
+          oneOf:
+            - type: integer
+            - type: string
+        styles:
+          type: array
+          items:
+            type: string
+            enum: [full, glance, spoken]
+        doors:
+          type: object
+          properties:
+            mcp:
+              type: string
+            hud:
+              type: string
+            webxr:
+              type: string
+
+    DocumentSummary:
+      type: object
+      required: [doc_uid, title, pages, type, machine_ids]
+      properties:
+        doc_uid:
+          type: string
+        title:
+          type: string
+        pages:
+          type: integer
+        type:
+          type: string
+        machine_ids:
+          type: array
+          items:
+            type: string
+
+    DocumentsResponse:
+      type: object
+      required: [documents, index_version]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentSummary"
+        index_version:
+          oneOf:
+            - type: integer
+            - type: string
+
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        k:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 6
+        machine_id:
+          type: string
+        machine:
+          type: string
+
+    Passage:
+      type: object
+      required: [doc_uid, title, page, text, score, image_url]
+      properties:
+        doc_uid:
+          type: string
+        title:
+          type: string
+        page:
+          type: integer
+        text:
+          type: string
+        score:
+          type: number
+        image_url:
+          type: string
+        n:
+          type: integer
+        i:
+          type: integer
+        semantic:
+          type:
+            - number
+            - "null"
+        keyword:
+          type:
+            - number
+            - "null"
+
+    SearchResponse:
+      type: object
+      required: [query, mode, passages]
+      properties:
+        query:
+          type: string
+        mode:
+          type:
+            - string
+            - "null"
+        engine:
+          type:
+            - string
+            - "null"
+        confidence:
+          type:
+            - number
+            - "null"
+        low_confidence:
+          type: boolean
+        machine:
+          type:
+            - string
+            - "null"
+        machine_matched:
+          type:
+            - boolean
+            - "null"
+        index_version:
+          type:
+            - integer
+            - string
+            - "null"
+        passages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Passage"
+
+    PhotoHint:
+      type: object
+      properties:
+        object:
+          type: string
+        details:
+          type: string
+        text_seen:
+          type: string
+        keywords:
+          type: string
+
+    PassageRef:
+      type: object
+      required: [doc_uid, page]
+      properties:
+        doc_uid:
+          type: string
+        page:
+          type: integer
+        i:
+          type: integer
+
+    AskRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+        query:
+          type: string
+        machine_id:
+          type: string
+        style:
+          type: string
+          enum: [full, glance, spoken]
+          default: full
+        lang:
+          type: string
+        photo:
+          $ref: "#/components/schemas/PhotoHint"
+        passages:
+          type: array
+          items:
+            $ref: "#/components/schemas/PassageRef"
+
+    Citation:
+      type: object
+      required: [n, doc_uid, title, page, image_url, image_url_small]
+      properties:
+        n:
+          type: integer
+        doc_uid:
+          type: string
+        title:
+          type: string
+        page:
+          type: integer
+        pages:
+          type:
+            - integer
+            - "null"
+        image_url:
+          type: string
+        image_url_small:
+          type: string
+
+    AskResponse:
+      type: object
+      required: [answer, mode, citations]
+      properties:
+        answer:
+          type: string
+        mode:
+          type: string
+          enum: [pdf, general, offline, gate]
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+        confidence:
+          type:
+            - number
+            - "null"
+        search_mode:
+          type:
+            - string
+            - "null"
+        cited:
+          type: array
+          items:
+            type: integer
+        note:
+          type: string
+
+    PageTextResponse:
+      type: object
+      required: [doc_uid, title, page, text, image_url, image_url_small]
+      properties:
+        doc_uid:
+          type: string
+        title:
+          type: string
+        page:
+          type: integer
+        pages:
+          type:
+            - integer
+            - "null"
+        text:
+          type: string
+        image_url:
+          type: string
+        image_url_small:
+          type: string
+
+    ScanRequest:
+      type: object
+      required: [image]
+      properties:
+        image:
+          type: string
+          description: Base64 data URL (`data:image/jpeg;base64,...`)
+        question:
+          type: string
+        query:
+          type: string
+        machine_id:
+          type: string
+        style:
+          type: string
+          enum: [full, glance, spoken]
+          default: full
+        lang:
+          type: string
+        hint:
+          type: string
+        session_id:
+          type: string
+          maxLength: 64
+        gate:
+          type: boolean
+          default: true
+
+    GateMetrics:
+      type: object
+      required: [blur_score, dhash, hamming_distance, is_blurry, is_duplicate]
+      properties:
+        blur_score:
+          type: number
+        dhash:
+          type: string
+        hamming_distance:
+          type:
+            - integer
+            - "null"
+        is_blurry:
+          type: boolean
+        is_duplicate:
+          type: boolean
+
+    EntityState:
+      type: object
+      required: [active_entity, turn_count, recent_turns]
+      properties:
+        active_entity:
+          type: string
+        turn_count:
+          type: integer
+        recent_turns:
+          type: integer
+
+    ScanPhotoSummary:
+      type: object
+      properties:
+        object:
+          type: string
+        details:
+          type: string
+        text_seen:
+          type: string
+
+    ScanResponse:
+      type: object
+      required: [status, cached, answer, mode, citations, photo, session_id, gate_metrics, entity_state]
+      properties:
+        status:
+          type: string
+          enum: [ok, skipped_blur, skipped_duplicate, reused_scene]
+        cached:
+          type: boolean
+        answer:
+          type: string
+        mode:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+        confidence:
+          type:
+            - number
+            - "null"
+        search_mode:
+          type:
+            - string
+            - "null"
+        note:
+          type: string
+        photo:
+          $ref: "#/components/schemas/ScanPhotoSummary"
+        session_id:
+          type: string
+        gate_metrics:
+          oneOf:
+            - $ref: "#/components/schemas/GateMetrics"
+            - type: "null"
+        entity_state:
+          $ref: "#/components/schemas/EntityState"
+
+    AgentRunRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+        max_steps:
+          type: integer
+          minimum: 1
+          maximum: 10
+
+    AgentStep:
+      type: object
+      required: [step, tool, read_only]
+      properties:
+        step:
+          type: integer
+        tool:
+          type: string
+        read_only:
+          type: boolean
+        ok:
+          type: boolean
+        approved:
+          type: boolean
+
+    AgentRunResponse:
+      type: object
+      required: [status, steps]
+      properties:
+        status:
+          type: string
+          enum: [completed, awaiting_approval, step_limit_reached]
+        answer:
+          type: string
+        approval_id:
+          type: string
+        tool:
+          type: string
+        args:
+          type: object
+          additionalProperties: true
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentStep"
+
+    ApprovalRecord:
+      type: object
+      required: [approval_id, tenant_id, tool_name, required_scope, args, status, created_at, expires_at]
+      properties:
+        approval_id:
+          type: string
+        tenant_id:
+          type: string
+        tool_name:
+          type: string
+        module_id:
+          type:
+            - string
+            - "null"
+        required_scope:
+          type: string
+        args:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        created_at:
+          type: number
+        expires_at:
+          type: number
+
+    AgentRejectResponse:
+      type: object
+      required: [status, approval_id, tool]
+      properties:
+        status:
+          type: string
+          enum: [rejected]
+        approval_id:
+          type: string
+        tool:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Missing required scope or policy denied
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource or tenant module not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Approval state conflict (already approved, rejected, or expired)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: AI daily or token/cost budget exceeded
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying (typically 3600)
+          schema:
+            type: string
+            example: "3600"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RateLimitError"
+
+paths:
+  /api/v1/health:
+    get:
+      summary: Server capabilities and index status
+      security: []
+      responses:
+        "200":
+          description: Server health and capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/v1/documents:
+    get:
+      summary: List visible documents for the caller
+      responses:
+        "200":
+          description: Visible document summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/search:
+    post:
+      summary: Search document passages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Ranked passages with page image URLs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/ask:
+    post:
+      summary: Ask a question grounded in documents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AskRequest"
+      responses:
+        "200":
+          description: Grounded answer with citations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AskResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/ask/stream:
+    post:
+      summary: Stream a grounded answer via Server-Sent Events (meta, delta, done)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AskRequest"
+      responses:
+        "200":
+          description: SSE stream of `meta`, `delta`, and `done` events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/scan:
+    post:
+      summary: Analyze a smart-glasses camera frame with blur/dedup gating and session context
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanRequest"
+      responses:
+        "200":
+          description: Scan result (`ok`, `skipped_blur`, `skipped_duplicate`, or `reused_scene`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "501":
+          description: Vision is not configured on this server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Upstream vision provider error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/documents/{uid}/pages/{page}:
+    get:
+      summary: Fetch page text and image URLs (or JPEG bytes when `{page}` ends with `.jpg`)
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{12}$"
+        - name: page
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "1"
+        - name: w
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 200
+            maximum: 1600
+          description: Target width in pixels when requesting `.jpg`
+      responses:
+        "200":
+          description: Page text JSON or JPEG image bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageTextResponse"
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/documents/{uid}/pages/{page}.jpg:
+    get:
+      summary: Fetch rendered document page as JPEG (optionally resized for glasses)
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{12}$"
+        - name: page
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        - name: w
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 200
+            maximum: 1600
+      responses:
+        "200":
+          description: JPEG page image
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/agent/run:
+    post:
+      summary: Run a bounded, policy-gated agent tool loop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentRunRequest"
+      responses:
+        "200":
+          description: Completed, step-limited, or paused awaiting human approval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "501":
+          description: Agents not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/agent/approvals/{approval_id}:
+    get:
+      summary: Inspect a pending or resolved agent write-tool approval
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          description: Agents not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/agent/approvals/{approval_id}/approve:
+    post:
+      summary: Approve and execute a pending agent write action
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval executed and agent loop resumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRunResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "501":
+          description: Agents not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/agent/approvals/{approval_id}/reject:
+    post:
+      summary: Reject a pending agent write action
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRejectResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "501":
+          description: Agents not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /hud:
+    get:
+      summary: 600x600 WebMCP HUD for Meta Ray-Ban Display
+      security: []
+      responses:
+        "200":
+          description: HTML HUD page
+          content:
+            text/html:
+              schema:
+                type: string
